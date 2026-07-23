@@ -1,0 +1,1345 @@
+# =============================================================================
+#  COMMODITIES SIGNAL DASHBOARD - Vol, VRP, Relative Value, Lead-Lag Monitor
+#
+#  IMPORTANT / EDUCATIONAL USE:
+#  This dashboard produces systematic trade-idea candidates, not investment advice.
+#  Every signal should be checked against liquidity, event risk, curve structure,
+#  contract specs, options market depth, and desk risk limits before any trade.
+#
+# =============================================================================
+#  WHAT WAS FIXED VS PRIOR VERSION
+# =============================================================================
+#
+#  1) "Pairs / relative value" was too vague: fade or ride?
+#     FIX:
+#       - Correlation-break signals now produce an explicit rule-based action:
+#           A) Corr breakdown vs normally related pair:
+#              FADE dispersion = buy recent underperformer / sell recent outperformer.
+#           B) Corr spike vs normally related pair:
+#              RIDE regime = buy recent outperformer / sell recent underperformer.
+#       - This is still only a heuristic. The code labels the action and the logic.
+#
+#  2) Lead-lag catch-up was barely showing.
+#     FIX:
+#       - The old filter required high average rolling correlation across the full
+#         history and could suppress many pairs.
+#       - Lead-lag now runs only on economically logical pairs, but with a cleaner
+#         rolling-window test and a lower default minimum peak correlation.
+#       - The trade is now explicit:
+#             if leader outperformed recently -> BUY laggard
+#             if leader underperformed recently -> SELL laggard
+#
+#  3) Softs were dominating vol trades.
+#     FIX:
+#       - Added manual vol-liquidity tiers.
+#       - Added stale-IV detection.
+#       - Added per-engine and per-asset-class caps so one market cluster cannot
+#         dominate the feed.
+#       - Added a "Min vol quality" control. Default excludes lowest quality vol
+#         signals and stale IV.
+#
+#  4) Too many correlation breaks.
+#     FIX:
+#       - Correlation pairs are restricted to economically logical sets:
+#           energy vs energy
+#           metals vs metals
+#           ags vs ags
+#           livestock vs livestock
+#           macro overlays vs everything
+#       - Random unrelated pairs like Silver / Soybean Meal are no longer scanned.
+#       - Added per-engine caps to keep the feed balanced.
+#
+#  5) How IV and realized vol work.
+#     EXPLANATION:
+#       - Realized vol here is historical volatility:
+#             daily returns over RV_WINDOW days,
+#             annualized by sqrt(252),
+#             expressed in vol points / percent.
+#       - Implied vol is market-implied future volatility embedded in option prices.
+#         It is not "today's historical vol." It is the option market's forward-
+#         looking volatility level for roughly the option tenor represented by the
+#         Bloomberg field. Here we use bq.data.hist_put_imp_vol, understood as
+#         roughly 30d ATM put implied volatility where available.
+#       - IV > RV means the option market is pricing more future volatility than the
+#         asset recently realized. That is the variance risk premium idea.
+#
+#  6) Why IV sometimes looks flat, e.g. Palladium.
+#     EXPLANATION:
+#       - Flat IV can happen because of sparse option quotes, stale marks, vendor
+#         interpolation, exchange holidays, or low option liquidity.
+#       - The code now flags "stale IV" when recent IV changes too little and excludes
+#         stale vol signals by default.
+#
+#  7) Illiquid vol products might produce useless signals.
+#     FIX:
+#       - Added VOL_QUALITY tiers and stale-IV filters.
+#       - Lower-quality products can still be viewed if the user chooses.
+#
+#  8) "Recompute no refresh" was unclear.
+#     FIX:
+#       - Renamed to "Apply controls".
+#       - It re-runs the analytics using already downloaded/cached data.
+#       - It does not call Bloomberg again.
+#
+#  9) Long straddle / gamma, short premium / spreads explanation.
+#     EXPLANATION:
+#       - Buy vol:
+#           You buy options when IV looks cheap and you expect future realized vol
+#           and/or implied vol to rise.
+#           Long straddle = long call + long put, same strike/expiry.
+#           Long gamma means the position benefits from large underlying moves and
+#           can be dynamically hedged.
+#           Other buy-vol expressions: long strangle, call/put, calendar, option
+#           spread, variance swap if available.
+#       - Sell vol:
+#           You sell options when IV looks rich and you expect future realized vol
+#           and/or implied vol to fall.
+#           Short premium means collecting option premium.
+#           Spreads define downside better than naked short options.
+#           Other sell-vol expressions: short straddle/strangle, iron fly/condor,
+#           credit spreads, variance swap short if available.
+#
+# 10) Correlation universe was too broad / illogical.
+#     FIX:
+#       - Added asset-class gating.
+#       - Macro overlays still run vs everything.
+#
+# 11) Should IV today be compared to future realized vol?
+#     EXPLANATION:
+#       - For a live signal, the future realized volatility is unknown.
+#       - The standard live VRP proxy compares today's IV with recent realized vol.
+#       - For research/backtesting, you can compare today's IV with realized vol
+#         over the next 21 trading days, but that would be look-ahead biased in a
+#         live dashboard. This code avoids look-ahead.
+#
+# 12) Too many description words / emojis.
+#     FIX:
+#       - Removed emojis.
+#       - Reduced tab/header descriptions.
+#       - Button names made plain.
+#
+# =============================================================================
+
+import bql
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import ipywidgets as widgets
+
+bq = bql.Service()
+
+# -----------------------------------------------------------------------------
+# Universe
+# -----------------------------------------------------------------------------
+IV_COMMODITIES = {
+    "Energy": {
+        "WTI Crude": "CL1 Comdty",
+        "Brent Crude": "CO1 Comdty",
+        "Natural Gas": "NG1 Comdty",
+        "RBOB Gasoline": "XB1 Comdty",
+        "Heating Oil": "HO1 Comdty",
+    },
+    "Precious Metals": {
+        "Gold": "GC1 Comdty",
+        "Silver": "SI1 Comdty",
+        "Platinum": "PL1 Comdty",
+        "Palladium": "PA1 Comdty",
+    },
+    "Base Metals": {
+        "Copper": "HG1 Comdty",
+        "Steel HRC": "HRC1 Comdty",
+    },
+    "Grains / Oilseeds": {
+        "Corn": "C 1 Comdty",
+        "Wheat CBOT": "W 1 Comdty",
+        "Wheat Kansas": "KW1 Comdty",
+        "Soybeans": "S 1 Comdty",
+        "Soybean Oil": "BO1 Comdty",
+        "Soybean Meal": "SM1 Comdty",
+    },
+    "Softs": {
+        "Sugar": "SB1 Comdty",
+        "Coffee": "KC1 Comdty",
+        "Cotton": "CT1 Comdty",
+        "Cocoa": "CC1 Comdty",
+    },
+    "Livestock": {
+        "Live Cattle": "LC1 Comdty",
+        "Lean Hogs": "LH1 Comdty",
+    },
+}
+
+PRICE_ONLY = {
+    "Aluminium LME": "LMAHDS03 Comdty",
+    "Nickel LME": "LMNIDS03 Comdty",
+    "Iron Ore SGX": "TIO1 Comdty",
+}
+
+MACRO = {
+    "S&P 500": "SPX Index",
+    "US Dollar DXY": "DXY Index",
+    "VIX": "VIX Index",
+    "US 2Y Yield": "USGG2YR Index",
+    "US 10Y Yield": "USGG10YR Index",
+    "US 30Y Yield": "USGG30YR Index",
+}
+
+IV_MAP = {n: t for g in IV_COMMODITIES.values() for n, t in g.items()}
+PRICE_MAP = {**IV_MAP, **PRICE_ONLY, **MACRO}
+NAME = {t: n for n, t in PRICE_MAP.items()}
+
+IV_TICKERS = list(IV_MAP.values())
+ALL_TICKERS = list(PRICE_MAP.values())
+
+ASSET_CLASS = {}
+for cls, mp in IV_COMMODITIES.items():
+    for n, t in mp.items():
+        ASSET_CLASS[t] = cls
+
+for n, t in PRICE_ONLY.items():
+    if "Aluminium" in n or "Nickel" in n:
+        ASSET_CLASS[t] = "Base Metals"
+    elif "Iron Ore" in n:
+        ASSET_CLASS[t] = "Base Metals"
+
+for n, t in MACRO.items():
+    ASSET_CLASS[t] = "Macro"
+
+# Manual option-market quality tiers.
+# This is intentionally conservative. It prevents lower-quality or stale option
+# marks from dominating the signal feed.
+#
+# A = generally better listed option liquidity / more reliable signal candidate
+# B = usable but should be checked carefully
+# C = often sparse / watch-only unless the desk confirms liquidity
+VOL_QUALITY = {
+    "CL1 Comdty": "A",
+    "CO1 Comdty": "A",
+    "NG1 Comdty": "A",
+    "XB1 Comdty": "A",
+    "HO1 Comdty": "A",
+    "GC1 Comdty": "A",
+    "SI1 Comdty": "A",
+    "HG1 Comdty": "A",
+    "C 1 Comdty": "A",
+    "W 1 Comdty": "A",
+    "S 1 Comdty": "A",
+    "KW1 Comdty": "B",
+    "BO1 Comdty": "B",
+    "SM1 Comdty": "B",
+    "SB1 Comdty": "B",
+    "KC1 Comdty": "B",
+    "CT1 Comdty": "B",
+    "CC1 Comdty": "B",
+    "PL1 Comdty": "B",
+    "PA1 Comdty": "C",
+    "LC1 Comdty": "C",
+    "LH1 Comdty": "C",
+    "HRC1 Comdty": "C",
+}
+
+QUALITY_RANK = {"A": 1, "B": 2, "C": 3}
+
+# -----------------------------------------------------------------------------
+# Theme / settings
+# -----------------------------------------------------------------------------
+BG, PANEL, GRID, TXT, MUTED = "#0E1117", "#161B22", "#222834", "#C9D1D9", "#8B949E"
+GREEN, RED, AMBER, BLUE, PURPLE = "#2ECC71", "#E74C3C", "#FFB74D", "#4FC3F7", "#BA68C8"
+
+HISTORY_YEARS = 3
+RV_WINDOW = 21
+CORR_WINDOW = 60
+PAIR_TRADE_RETURN_WINDOW = 20
+LEAD_LAG_MAX_DAYS = 10
+
+STATE = {}
+
+# -----------------------------------------------------------------------------
+# Data layer
+# -----------------------------------------------------------------------------
+def _pull(tickers, item_fn, start, end):
+    field = item_fn(dates=bq.func.range(start, end))
+    frames, failed = {}, []
+
+    for tk in tickers:
+        try:
+            res = bq.execute(bql.Request(tk, field))
+            d = res[0].df().reset_index()
+            d = d.drop(columns=[c for c in ["CURRENCY"] if c in d.columns])
+
+            vcols = [c for c in d.columns if c not in ["ID", "DATE"]]
+            if not vcols:
+                failed.append(tk)
+                continue
+
+            vcol = vcols[0]
+            s = d.set_index("DATE")[vcol].sort_index()
+            s = s[~s.index.duplicated(keep="last")]
+
+            if s.dropna().empty:
+                failed.append(tk)
+            else:
+                frames[tk] = s
+
+        except Exception:
+            failed.append(tk)
+
+    df = pd.DataFrame(frames).sort_index() if frames else pd.DataFrame()
+    return df, failed
+
+
+def fetch_all(progress=None):
+    end = pd.Timestamp("today").strftime("%Y-%m-%d")
+    start = (pd.Timestamp("today") - pd.DateOffset(years=HISTORY_YEARS)).strftime("%Y-%m-%d")
+
+    if progress:
+        progress.value = f"<span style='color:{MUTED}'>Pulling prices</span>"
+
+    px, px_fail = _pull(ALL_TICKERS, bq.data.px_last, start, end)
+    px = px.ffill()
+
+    if progress:
+        progress.value = f"<span style='color:{MUTED}'>Pulling implied vol</span>"
+
+    iv, iv_fail = _pull(IV_TICKERS, bq.data.hist_put_imp_vol, start, end)
+    iv = iv.ffill()
+
+    return px, iv, px_fail, iv_fail
+
+
+# -----------------------------------------------------------------------------
+# Analytics helpers
+# -----------------------------------------------------------------------------
+def pct_rank(series, lookback):
+    s = series.dropna()
+    if len(s) < 20:
+        return np.nan, np.nan, np.nan
+
+    s = s.iloc[-lookback:] if lookback else s
+    v = s.iloc[-1]
+
+    pr = (s < v).mean() * 100
+    sd = s.std()
+    z = (v - s.mean()) / sd if sd and pd.notna(sd) else np.nan
+
+    return v, pr, z
+
+
+def realized_vol(px, window=RV_WINDOW):
+    # Realized volatility:
+    # daily returns -> rolling standard deviation -> annualized by sqrt(252)
+    # This is backward-looking historical vol, not a market-implied future number.
+    return px.pct_change().rolling(window).std() * np.sqrt(252) * 100
+
+
+def stale_iv_stats(series, flat_window=15):
+    s = series.dropna()
+    if len(s) < flat_window + 5:
+        return False, np.nan, np.nan
+
+    recent = s.tail(flat_window)
+    changes = recent.diff().abs().dropna()
+
+    zero_change_ratio = (changes < 0.01).mean() if len(changes) else np.nan
+    recent_range = recent.max() - recent.min()
+
+    is_stale = (
+        pd.notna(zero_change_ratio)
+        and zero_change_ratio >= 0.80
+        and pd.notna(recent_range)
+        and recent_range <= 0.25
+    )
+
+    return is_stale, zero_change_ratio, recent_range
+
+
+def lead_lag(x_ret, y_ret, max_lag=LEAD_LAG_MAX_DAYS):
+    # corr(x_t, y_{t+k}); k > 0 means x tends to lead y by k days.
+    best_k, best_c = 0, 0.0
+
+    for k in range(-max_lag, max_lag + 1):
+        c = x_ret.corr(y_ret.shift(-k))
+        if pd.notna(c) and abs(c) > abs(best_c):
+            best_k, best_c = k, c
+
+    return best_k, best_c
+
+
+def same_macro_or_asset_class(a, b):
+    ca, cb = ASSET_CLASS.get(a), ASSET_CLASS.get(b)
+
+    if ca is None or cb is None:
+        return False
+
+    if ca == "Macro" or cb == "Macro":
+        return True
+
+    return ca == cb
+
+
+def allowed_corr_pair(a, b):
+    # This removes economically random pairs like Silver / Soybean Meal.
+    # Macro overlays are allowed against all commodities.
+    return same_macro_or_asset_class(a, b)
+
+
+def is_macro_pair(a, b):
+    return ASSET_CLASS.get(a) == "Macro" or ASSET_CLASS.get(b) == "Macro"
+
+
+def recent_return(px, tk, window):
+    if tk not in px:
+        return np.nan
+    s = px[tk].dropna()
+    if len(s) < window + 1:
+        return np.nan
+    return s.pct_change(window).iloc[-1] * 100
+
+
+def pair_action_from_corr_break(px, a, b, z):
+    ra = recent_return(px, a, PAIR_TRADE_RETURN_WINDOW)
+    rb = recent_return(px, b, PAIR_TRADE_RETURN_WINDOW)
+
+    if pd.isna(ra) or pd.isna(rb):
+        return "No action", "Insufficient recent return history"
+
+    na, nb = NAME.get(a, a), NAME.get(b, b)
+
+    outperformer, underperformer = (a, b) if ra >= rb else (b, a)
+    n_out, n_under = NAME.get(outperformer, outperformer), NAME.get(underperformer, underperformer)
+
+    if z < 0:
+        # Corr breakdown for related assets:
+        # relationship has weakened; relative dispersion may be too wide.
+        # Fade dispersion = buy underperformer / sell outperformer.
+        bias = f"FADE: BUY {n_under} / SELL {n_out}"
+        detail = f"20d returns: {na} {ra:+.1f}%, {nb} {rb:+.1f}%; corr breakdown"
+    else:
+        # Corr spike:
+        # common-factor regime is stronger than usual.
+        # Ride regime = stay with relative momentum until the regime weakens.
+        bias = f"RIDE: BUY {n_out} / SELL {n_under}"
+        detail = f"20d returns: {na} {ra:+.1f}%, {nb} {rb:+.1f}%; corr spike"
+
+    return bias, detail
+
+
+def add_idea(ideas, score, engine, asset_class, name, signal, bias, detail, quality=""):
+    ideas.append(
+        dict(
+            score=float(score),
+            engine=engine,
+            asset_class=asset_class,
+            name=name,
+            signal=signal,
+            bias=bias,
+            detail=detail,
+            quality=quality,
+        )
+    )
+
+
+def cap_ideas(df, max_per_engine=7, max_per_asset_class=5):
+    if df.empty:
+        return df
+
+    df = df.sort_values("score", ascending=False).copy()
+
+    kept = []
+    engine_counts = {}
+    class_counts = {}
+
+    for _, r in df.iterrows():
+        eng = r["engine"]
+        cls = r["asset_class"]
+
+        if engine_counts.get(eng, 0) >= max_per_engine:
+            continue
+
+        if class_counts.get(cls, 0) >= max_per_asset_class:
+            continue
+
+        kept.append(r)
+        engine_counts[eng] = engine_counts.get(eng, 0) + 1
+        class_counts[cls] = class_counts.get(cls, 0) + 1
+
+    return pd.DataFrame(kept).sort_values("score", ascending=False) if kept else pd.DataFrame()
+
+
+# -----------------------------------------------------------------------------
+# Main signal builder
+# -----------------------------------------------------------------------------
+def build_signals(
+    px,
+    iv,
+    lookback,
+    iv_lo,
+    iv_hi,
+    z_corr,
+    gap_thresh,
+    min_vol_quality,
+    exclude_stale_iv,
+    min_leadlag_corr,
+    max_per_engine,
+    max_per_asset_class,
+):
+    rv = realized_vol(px)
+    ret = px.pct_change()
+
+    ideas = []
+    iv_rows = []
+
+    min_quality_rank = QUALITY_RANK[min_vol_quality]
+
+    # -------------------------------------------------------------------------
+    # Engine 1: IV mean reversion
+    # Engine 2: Variance risk premium
+    # -------------------------------------------------------------------------
+    for tk in iv.columns:
+        nm = NAME.get(tk, tk)
+        cls = ASSET_CLASS.get(tk, "Other")
+        q = VOL_QUALITY.get(tk, "C")
+
+        ivv, ivpr, ivz = pct_rank(iv[tk], lookback)
+        if np.isnan(ivv):
+            continue
+
+        stale, zero_ratio, recent_range = stale_iv_stats(iv[tk])
+
+        rv_last = rv[tk].dropna().iloc[-1] if tk in rv and rv[tk].dropna().size else np.nan
+
+        vrp_series = (iv[tk] - rv[tk]).dropna() if tk in rv else pd.Series(dtype=float)
+        vrpv, vrppr, vrpz = pct_rank(vrp_series, lookback) if len(vrp_series) else (np.nan, np.nan, np.nan)
+
+        iv_rows.append(
+            dict(
+                name=nm,
+                ticker=tk,
+                asset_class=cls,
+                quality=q,
+                stale_iv=stale,
+                iv=ivv,
+                iv_pct=ivpr,
+                iv_z=ivz,
+                rv=rv_last,
+                vrp=vrpv,
+                vrp_pct=vrppr,
+                vrp_z=vrpz,
+                zero_change_ratio=zero_ratio,
+                recent_iv_range=recent_range,
+            )
+        )
+
+        quality_ok = QUALITY_RANK.get(q, 3) <= min_quality_rank
+        stale_ok = (not exclude_stale_iv) or (not stale)
+
+        if not quality_ok or not stale_ok:
+            continue
+
+        # IV mean-reversion:
+        # Low IV percentile -> options look cheap vs their own history -> buy vol.
+        # High IV percentile -> options look rich vs their own history -> sell vol.
+        if ivpr <= iv_lo:
+            add_idea(
+                ideas,
+                score=(50 - ivpr) / 50,
+                engine="IV mean revert",
+                asset_class=cls,
+                name=nm,
+                signal=f"IV {ivv:.1f} at {ivpr:.0f}th pctile",
+                bias="BUY VOL",
+                detail="Long straddle/gamma, strangle, call/put, debit spread, or variance if available",
+                quality=q,
+            )
+
+        elif ivpr >= iv_hi:
+            add_idea(
+                ideas,
+                score=(ivpr - 50) / 50,
+                engine="IV mean revert",
+                asset_class=cls,
+                name=nm,
+                signal=f"IV {ivv:.1f} at {ivpr:.0f}th pctile",
+                bias="SELL VOL",
+                detail="Short premium, credit spread, iron fly/condor, or variance if available",
+                quality=q,
+            )
+
+        # Variance risk premium:
+        # Live version compares today's implied vol to recent realized vol.
+        # Comparing today's IV to future realized vol is correct for research,
+        # but it would be look-ahead biased in a live dashboard.
+        if not np.isnan(vrppr):
+            if vrppr >= iv_hi:
+                add_idea(
+                    ideas,
+                    score=(vrppr - 50) / 50,
+                    engine="VRP",
+                    asset_class=cls,
+                    name=nm,
+                    signal=f"IV-RV {vrpv:+.1f} vol pts at {vrppr:.0f}th pctile",
+                    bias="SELL VOL",
+                    detail=f"IV {ivv:.1f} vs realized {rv_last:.1f}",
+                    quality=q,
+                )
+
+            elif vrppr <= iv_lo:
+                add_idea(
+                    ideas,
+                    score=(50 - vrppr) / 50,
+                    engine="VRP",
+                    asset_class=cls,
+                    name=nm,
+                    signal=f"IV-RV {vrpv:+.1f} vol pts at {vrppr:.0f}th pctile",
+                    bias="BUY VOL",
+                    detail=f"IV {ivv:.1f} vs realized {rv_last:.1f}",
+                    quality=q,
+                )
+
+    iv_table = pd.DataFrame(iv_rows)
+
+    # -------------------------------------------------------------------------
+    # Engine 3: Correlation break
+    # Engine 4: Lead-lag catch-up
+    # -------------------------------------------------------------------------
+    cols = [c for c in PRICE_MAP.values() if c in ret.columns]
+    corr_now = ret[cols].tail(CORR_WINDOW).corr() if cols else pd.DataFrame()
+
+    disloc = []
+    pairs = [
+        (cols[i], cols[j])
+        for i in range(len(cols))
+        for j in range(i + 1, len(cols))
+        if allowed_corr_pair(cols[i], cols[j])
+    ]
+
+    for a, b in pairs:
+        na, nb = NAME.get(a, a), NAME.get(b, b)
+        cls_a, cls_b = ASSET_CLASS.get(a, "Other"), ASSET_CLASS.get(b, "Other")
+        pair_cls = "Macro" if is_macro_pair(a, b) else cls_a
+
+        rcr = ret[a].rolling(CORR_WINDOW).corr(ret[b]).dropna()
+
+        if len(rcr) < 80:
+            continue
+
+        cur = rcr.iloc[-1]
+        mean = rcr.mean()
+        sd = rcr.std()
+
+        if not sd or pd.isna(sd):
+            continue
+
+        z = (cur - mean) / sd
+
+        # Correlation break matters more when the pair is normally related.
+        # This avoids clutter from weak relationships.
+        normally_related = abs(mean) >= 0.35 if is_macro_pair(a, b) else abs(mean) >= 0.45
+
+        if pd.notna(z) and abs(z) >= z_corr and normally_related:
+            direction = "spike" if z > 0 else "breakdown"
+            bias, detail = pair_action_from_corr_break(px, a, b, z)
+
+            disloc.append(
+                dict(
+                    pair=f"{na} / {nb}",
+                    a=a,
+                    b=b,
+                    corr=cur,
+                    mean=mean,
+                    z=z,
+                    kind="regime",
+                    note=f"corr {cur:+.2f}, avg {mean:+.2f}, z {z:+.1f}, {direction}",
+                    action=bias,
+                )
+            )
+
+            add_idea(
+                ideas,
+                score=min(abs(z) / 3, 1.5),
+                engine="Correlation RV",
+                asset_class=pair_cls,
+                name=f"{na} / {nb}",
+                signal=f"60d corr {cur:+.2f}, z {z:+.1f}",
+                bias=bias,
+                detail=detail,
+                quality="",
+            )
+
+        # Lead-lag catch-up:
+        # Restricted to logical pairs; macro allowed but still needs strong enough
+        # peak lead-lag correlation in the current window.
+        win = ret[[a, b]].tail(CORR_WINDOW).dropna()
+        if len(win) < 40:
+            continue
+
+        k, pk = lead_lag(win[a], win[b])
+
+        if k == 0 or abs(pk) < min_leadlag_corr:
+            continue
+
+        leader, follower = (a, b) if k > 0 else (b, a)
+        lag = abs(k)
+        nL, nF = NAME.get(leader, leader), NAME.get(follower, follower)
+
+        lead_move = recent_return(px, leader, lag)
+        foll_move = recent_return(px, follower, lag)
+
+        if pd.isna(lead_move) or pd.isna(foll_move):
+            continue
+
+        gap = lead_move - foll_move
+
+        if abs(gap) < gap_thresh:
+            continue
+
+        side = "BUY" if gap > 0 else "SELL"
+
+        add_idea(
+            ideas,
+            score=min(abs(gap) / max(gap_thresh * 2, 0.01), 1.4),
+            engine="Lead-lag catch-up",
+            asset_class=pair_cls,
+            name=f"{nL} leads {nF}",
+            signal=f"{lag}d lead; leader {lead_move:+.1f}%, laggard {foll_move:+.1f}%",
+            bias=f"{side} {nF}",
+            detail=f"peak lead-lag r {pk:+.2f}, gap {gap:+.1f}%",
+            quality="",
+        )
+
+    raw_ideas_df = pd.DataFrame(ideas).sort_values("score", ascending=False) if ideas else pd.DataFrame()
+    ideas_df = cap_ideas(raw_ideas_df, max_per_engine=max_per_engine, max_per_asset_class=max_per_asset_class)
+
+    return dict(
+        px=px,
+        iv=iv,
+        rv=rv,
+        ret=ret,
+        iv_table=iv_table,
+        corr_now=corr_now,
+        disloc=disloc,
+        ideas=ideas_df,
+        raw_ideas=raw_ideas_df,
+        lookback=lookback,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Renderers
+# -----------------------------------------------------------------------------
+def _chip(txt, clr):
+    return (
+        f"<span style='background:{clr}22;color:{clr};border:1px solid {clr}55;"
+        f"border-radius:5px;padding:1px 7px;font:600 11px Inter,Arial'>{txt}</span>"
+    )
+
+
+TYPE_CLR = {
+    "IV mean revert": BLUE,
+    "VRP": AMBER,
+    "Correlation RV": PURPLE,
+    "Lead-lag catch-up": GREEN,
+}
+
+
+def render_ideas(res):
+    df = res["ideas"]
+
+    if df.empty:
+        return widgets.HTML(
+            f"<div style='color:{MUTED};padding:20px'>No signals crossed the current filters.</div>"
+        )
+
+    rows = ""
+
+    for _, r in df.iterrows():
+        bias = str(r["bias"])
+
+        if "BUY VOL" in bias or bias.startswith("BUY") or "BUY " in bias:
+            biasclr = GREEN
+        elif "SELL VOL" in bias or bias.startswith("SELL") or "SELL " in bias:
+            biasclr = RED
+        else:
+            biasclr = TXT
+
+        q = f"Q{r['quality']}" if r.get("quality", "") else ""
+
+        rows += (
+            f"<tr style='border-bottom:1px solid {GRID}'>"
+            f"<td style='padding:9px 10px'>{_chip(r['engine'], TYPE_CLR.get(r['engine'], MUTED))}</td>"
+            f"<td style='padding:9px 10px;font:600 13px Inter,Arial;color:{TXT}'>{r['name']}</td>"
+            f"<td style='padding:9px 10px;font:400 12px Inter,Arial;color:{TXT}'>{r['signal']}</td>"
+            f"<td style='padding:9px 10px;font:700 12px Inter,Arial;color:{biasclr}'>{r['bias']}</td>"
+            f"<td style='padding:9px 10px;font:400 11px Inter,Arial;color:{MUTED}'>{r['detail']}</td>"
+            f"<td style='padding:9px 10px;font:600 11px Inter,Arial;color:{MUTED}'>{q}</td>"
+            f"</tr>"
+        )
+
+    return widgets.HTML(
+        f"<div style='font:400 12px Inter,Arial;color:{MUTED};margin:2px 0 8px'>"
+        f"{len(df)} shown from {len(res['raw_ideas'])} raw signals</div>"
+        f"<table style='border-collapse:collapse;width:100%;background:{PANEL};"
+        f"border:1px solid {GRID};border-radius:10px;overflow:hidden'>"
+        f"<tr style='background:#1C2230'>"
+        f"<th style='text-align:left;padding:8px 10px;font:600 11px Inter,Arial;color:{MUTED}'>ENGINE</th>"
+        f"<th style='text-align:left;padding:8px 10px;font:600 11px Inter,Arial;color:{MUTED}'>ASSET / PAIR</th>"
+        f"<th style='text-align:left;padding:8px 10px;font:600 11px Inter,Arial;color:{MUTED}'>TRIGGER</th>"
+        f"<th style='text-align:left;padding:8px 10px;font:600 11px Inter,Arial;color:{MUTED}'>ACTION</th>"
+        f"<th style='text-align:left;padding:8px 10px;font:600 11px Inter,Arial;color:{MUTED}'>NOTES</th>"
+        f"<th style='text-align:left;padding:8px 10px;font:600 11px Inter,Arial;color:{MUTED}'>VOL Q</th>"
+        f"</tr>{rows}</table>"
+    )
+
+
+def render_iv_table(res):
+    t = res["iv_table"].copy()
+
+    if t.empty:
+        return widgets.HTML(f"<div style='color:{MUTED}'>No IV data.</div>")
+
+    t = t.sort_values(["stale_iv", "quality", "iv_pct"])
+
+    rows = ""
+
+    for _, r in t.iterrows():
+        def heat(p):
+            if np.isnan(p):
+                return MUTED
+            return RED if p >= 80 else GREEN if p <= 20 else TXT
+
+        stale_txt = "STALE" if r["stale_iv"] else ""
+        stale_clr = AMBER if r["stale_iv"] else MUTED
+
+        rows += (
+            f"<tr style='border-bottom:1px solid {GRID}'>"
+            f"<td style='padding:7px 10px;font:600 12px Inter,Arial;color:{TXT}'>{r['name']}</td>"
+            f"<td style='padding:7px 10px;color:{MUTED}'>{r['asset_class']}</td>"
+            f"<td style='padding:7px 10px;text-align:center;color:{MUTED}'>{r['quality']}</td>"
+            f"<td style='padding:7px 10px;text-align:center;color:{stale_clr}'>{stale_txt}</td>"
+            f"<td style='padding:7px 10px;text-align:right;color:{TXT}'>{r['iv']:.1f}</td>"
+            f"<td style='padding:7px 10px;text-align:right;font:600 12px Inter,Arial;color:{heat(r['iv_pct'])}'>{r['iv_pct']:.0f}</td>"
+            f"<td style='padding:7px 10px;text-align:right;color:{TXT}'>{r['rv']:.1f}</td>"
+            f"<td style='padding:7px 10px;text-align:right;color:{TXT}'>{r['vrp']:+.1f}</td>"
+            f"<td style='padding:7px 10px;text-align:right;font:600 12px Inter,Arial;color:{heat(r['vrp_pct'])}'>{r['vrp_pct']:.0f}</td>"
+            f"</tr>"
+        )
+
+    return widgets.HTML(
+        f"<table style='border-collapse:collapse;width:100%;background:{PANEL};"
+        f"border:1px solid {GRID};border-radius:10px;overflow:hidden'>"
+        f"<tr style='background:#1C2230'>"
+        + "".join(
+            f"<th style='padding:8px 10px;text-align:{al};font:600 11px Inter,Arial;color:{MUTED}'>{h}</th>"
+            for h, al in [
+                ("ASSET", "left"),
+                ("CLASS", "left"),
+                ("Q", "center"),
+                ("STALE", "center"),
+                ("IV", "right"),
+                ("IV PCTILE", "right"),
+                ("REALIZED", "right"),
+                ("IV-RV", "right"),
+                ("IV-RV PCTILE", "right"),
+            ]
+        )
+        + f"</tr>{rows}</table>"
+    )
+
+
+def iv_drill_fig(res, tk):
+    iv, rv = res["iv"], res["rv"]
+
+    s_iv = iv[tk].dropna()
+    s_rv = rv[tk].reindex(s_iv.index)
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=s_iv.index,
+            y=s_iv,
+            name="Implied vol",
+            line=dict(color=BLUE, width=2.2),
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=s_rv.index,
+            y=s_rv,
+            name="Realized vol",
+            line=dict(color=AMBER, width=1.6, dash="dot"),
+        )
+    )
+
+    for q, lbl in [(0.1, "10th"), (0.9, "90th")]:
+        fig.add_hline(
+            y=s_iv.quantile(q),
+            line=dict(color="#555", width=1, dash="dash"),
+            annotation_text=f"IV {lbl}",
+            annotation_font_color=MUTED,
+        )
+
+    stale, zero_ratio, recent_range = stale_iv_stats(s_iv)
+    stale_note = " | stale-IV flag" if stale else ""
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=420,
+        paper_bgcolor=BG,
+        plot_bgcolor=BG,
+        title=f"<b>{NAME.get(tk, tk)} - Implied vs Realized Vol{stale_note}</b>",
+        font=dict(family="Inter", color=TXT),
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.02, x=1, xanchor="right"),
+        margin=dict(l=55, r=20, t=60, b=35),
+        xaxis=dict(gridcolor=GRID),
+        yaxis=dict(title="vol %", gridcolor=GRID),
+    )
+
+    return go.FigureWidget(fig)
+
+
+def corr_heatmap(res):
+    c = res["corr_now"].copy()
+
+    if c.empty:
+        return widgets.HTML(f"<div style='color:{MUTED}'>No correlation data.</div>")
+
+    labels = [NAME.get(t, t) for t in c.columns]
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=c.values,
+            x=labels,
+            y=labels,
+            zmid=0,
+            zmin=-1,
+            zmax=1,
+            colorscale="RdBu",
+            reversescale=True,
+            colorbar=dict(title="corr"),
+        )
+    )
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=620,
+        paper_bgcolor=BG,
+        plot_bgcolor=BG,
+        title=f"<b>{CORR_WINDOW}d Correlation Matrix</b>",
+        font=dict(family="Inter", color=TXT, size=10),
+        margin=dict(l=110, r=20, t=60, b=110),
+        xaxis=dict(tickangle=-45),
+    )
+
+    return go.FigureWidget(fig)
+
+
+def corr_pair_fig(res, a, b):
+    ret = res["ret"]
+
+    rcr = ret[a].rolling(CORR_WINDOW).corr(ret[b]).dropna()
+
+    if rcr.empty:
+        return widgets.HTML(f"<div style='color:{MUTED}'>No pair data.</div>")
+
+    mean, sd = rcr.mean(), rcr.std()
+
+    win = ret[[a, b]].tail(CORR_WINDOW).dropna()
+    k, pk = lead_lag(win[a], win[b]) if len(win) else (0, np.nan)
+
+    na, nb = NAME.get(a, a), NAME.get(b, b)
+
+    if k > 0:
+        ll = f"{na} leads {nb} by {k}d, peak r {pk:+.2f}"
+    elif k < 0:
+        ll = f"{nb} leads {na} by {abs(k)}d, peak r {pk:+.2f}"
+    else:
+        ll = "no lead-lag"
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=rcr.index,
+            y=rcr,
+            name="60d corr",
+            line=dict(color=BLUE, width=2.2),
+        )
+    )
+
+    fig.add_hline(y=mean, line=dict(color=MUTED, width=1))
+
+    if pd.notna(sd):
+        for s, lbl in [(2, "+2sd"), (-2, "-2sd")]:
+            fig.add_hline(
+                y=mean + s * sd,
+                line=dict(color="#555", width=1, dash="dash"),
+                annotation_text=lbl,
+                annotation_font_color=MUTED,
+            )
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=420,
+        paper_bgcolor=BG,
+        plot_bgcolor=BG,
+        title=f"<b>{na} / {nb}</b> | {ll}",
+        font=dict(family="Inter", color=TXT),
+        hovermode="x unified",
+        margin=dict(l=55, r=20, t=60, b=35),
+        xaxis=dict(gridcolor=GRID),
+        yaxis=dict(title="correlation", gridcolor=GRID),
+    )
+
+    return go.FigureWidget(fig)
+
+
+# -----------------------------------------------------------------------------
+# Controls
+# -----------------------------------------------------------------------------
+LABEL = {"description_width": "130px"}
+WIDE = widgets.Layout(width="340px")
+
+lookback_dd = widgets.Dropdown(
+    options=[("1 year", 252), ("2 years", 504), ("3 years", 0)],
+    value=252,
+    description="Pctile lookback:",
+    style=LABEL,
+    layout=WIDE,
+)
+
+iv_lo = widgets.IntSlider(
+    value=10,
+    min=5,
+    max=30,
+    step=5,
+    description="Cheap <= pctile:",
+    continuous_update=False,
+    style=LABEL,
+    layout=WIDE,
+)
+
+iv_hi = widgets.IntSlider(
+    value=90,
+    min=70,
+    max=95,
+    step=5,
+    description="Rich >= pctile:",
+    continuous_update=False,
+    style=LABEL,
+    layout=WIDE,
+)
+
+min_vol_quality = widgets.Dropdown(
+    options=[("A only", "A"), ("A and B", "B"), ("A, B and C", "C")],
+    value="B",
+    description="Min vol quality:",
+    style=LABEL,
+    layout=WIDE,
+)
+
+exclude_stale_iv = widgets.Checkbox(
+    value=True,
+    description="Exclude stale IV",
+    indent=False,
+    layout=widgets.Layout(width="180px"),
+)
+
+z_corr = widgets.FloatSlider(
+    value=2.25,
+    min=1.0,
+    max=3.5,
+    step=0.25,
+    description="Corr |z| >=:",
+    continuous_update=False,
+    style=LABEL,
+    layout=WIDE,
+)
+
+gap_sl = widgets.FloatSlider(
+    value=2.0,
+    min=0.5,
+    max=8.0,
+    step=0.5,
+    description="Lead-lag gap >=:",
+    continuous_update=False,
+    style=LABEL,
+    layout=WIDE,
+)
+
+min_leadlag_corr = widgets.FloatSlider(
+    value=0.30,
+    min=0.20,
+    max=0.70,
+    step=0.05,
+    description="Lead-lag r >=:",
+    continuous_update=False,
+    style=LABEL,
+    layout=WIDE,
+)
+
+max_per_engine = widgets.IntSlider(
+    value=7,
+    min=3,
+    max=15,
+    step=1,
+    description="Max per engine:",
+    continuous_update=False,
+    style=LABEL,
+    layout=WIDE,
+)
+
+max_per_asset_class = widgets.IntSlider(
+    value=5,
+    min=2,
+    max=12,
+    step=1,
+    description="Max per class:",
+    continuous_update=False,
+    style=LABEL,
+    layout=WIDE,
+)
+
+refresh_btn = widgets.Button(
+    description="Refresh data",
+    button_style="success",
+    layout=widgets.Layout(width="180px", height="34px"),
+)
+
+recompute_btn = widgets.Button(
+    description="Apply controls",
+    button_style="info",
+    layout=widgets.Layout(width="180px", height="34px"),
+)
+
+status = widgets.HTML()
+
+iv_drill_dd = widgets.Dropdown(description="Asset:", style=LABEL, layout=WIDE)
+pair_a_dd = widgets.Dropdown(description="Asset A:", style=LABEL, layout=WIDE)
+pair_b_dd = widgets.Dropdown(description="Asset B:", style=LABEL, layout=WIDE)
+
+ideas_box = widgets.VBox()
+iv_table_box = widgets.VBox()
+iv_chart_box = widgets.VBox()
+corr_heat_box = widgets.VBox()
+corr_pair_box = widgets.VBox()
+disloc_box = widgets.VBox()
+
+
+# -----------------------------------------------------------------------------
+# Wiring
+# -----------------------------------------------------------------------------
+def recompute(*_):
+    # "Apply controls" means:
+    # use the already downloaded price/IV data in STATE and rerun the signal logic.
+    # It does not hit Bloomberg again.
+    if "px" not in STATE:
+        status.value = f"<span style='color:{AMBER}'>Click Refresh data first.</span>"
+        return
+
+    res = build_signals(
+        STATE["px"],
+        STATE["iv"],
+        lookback_dd.value,
+        iv_lo.value,
+        iv_hi.value,
+        z_corr.value,
+        gap_sl.value,
+        min_vol_quality.value,
+        exclude_stale_iv.value,
+        min_leadlag_corr.value,
+        max_per_engine.value,
+        max_per_asset_class.value,
+    )
+
+    STATE["res"] = res
+
+    ideas_box.children = [render_ideas(res)]
+    iv_table_box.children = [render_iv_table(res)]
+
+    if res["disloc"]:
+        d = sorted(res["disloc"], key=lambda x: -abs(x["z"]))
+
+        html = "".join(
+            f"<div style='padding:6px 0;border-bottom:1px solid {GRID};"
+            f"font:400 12px Inter,Arial;color:{TXT}'>"
+            f"<b>{x['pair']}</b> | {x['note']} | {x['action']}</div>"
+            for x in d[:20]
+        )
+
+        disloc_box.children = [
+            widgets.HTML(
+                f"<div style='font:600 11px Inter,Arial;color:{MUTED};"
+                f"letter-spacing:.06em;margin-bottom:4px'>CORRELATION DISLOCATIONS</div>{html}"
+            )
+        ]
+    else:
+        disloc_box.children = [
+            widgets.HTML(f"<div style='color:{MUTED}'>None above threshold.</div>")
+        ]
+
+    corr_heat_box.children = [corr_heatmap(res)]
+
+    redraw_iv_chart()
+    redraw_pair_chart()
+
+    status.value = (
+        f"<span style='color:{GREEN}'>Loaded. "
+        f"{len(res['ideas'])} shown from {len(res['raw_ideas'])} raw signals.</span>"
+    )
+
+
+def refresh(*_):
+    status.value = f"<span style='color:{MUTED}'>Fetching data</span>"
+
+    try:
+        px, iv, px_fail, iv_fail = fetch_all(status)
+
+        STATE["px"], STATE["iv"] = px, iv
+
+        iv_drill_dd.options = [(NAME.get(t, t), t) for t in iv.columns]
+        corr_opts = [(NAME.get(t, t), t) for t in px.columns]
+
+        pair_a_dd.options = corr_opts
+        pair_b_dd.options = corr_opts
+
+        if iv.columns.size:
+            iv_drill_dd.value = iv.columns[0]
+
+        if len(corr_opts) > 1:
+            pair_a_dd.value = corr_opts[0][1]
+            pair_b_dd.value = corr_opts[1][1]
+
+        recompute()
+
+        warn = ""
+
+        if px_fail:
+            warn += (
+                f"<br><span style='color:{AMBER}'>No price data: "
+                f"{', '.join(NAME.get(t, t) for t in px_fail)}</span>"
+            )
+
+        if iv_fail:
+            warn += (
+                f"<br><span style='color:{AMBER}'>No IV data: "
+                f"{', '.join(NAME.get(t, t) for t in iv_fail)}</span>"
+            )
+
+        status.value = (
+            f"<span style='color:{GREEN}'>Data loaded. "
+            f"{px.shape[1]} price assets, {iv.shape[1]} IV assets.</span>{warn}"
+        )
+
+    except Exception as e:
+        status.value = f"<span style='color:{RED}'>Error: {e}</span>"
+
+
+def redraw_iv_chart(*_):
+    if "res" in STATE and iv_drill_dd.value:
+        iv_chart_box.children = [iv_drill_fig(STATE["res"], iv_drill_dd.value)]
+
+
+def redraw_pair_chart(*_):
+    if (
+        "res" in STATE
+        and pair_a_dd.value
+        and pair_b_dd.value
+        and pair_a_dd.value != pair_b_dd.value
+    ):
+        corr_pair_box.children = [
+            corr_pair_fig(STATE["res"], pair_a_dd.value, pair_b_dd.value)
+        ]
+
+
+refresh_btn.on_click(refresh)
+recompute_btn.on_click(recompute)
+
+iv_drill_dd.observe(redraw_iv_chart, names="value")
+pair_a_dd.observe(redraw_pair_chart, names="value")
+pair_b_dd.observe(redraw_pair_chart, names="value")
+
+for w in [
+    lookback_dd,
+    iv_lo,
+    iv_hi,
+    min_vol_quality,
+    exclude_stale_iv,
+    z_corr,
+    gap_sl,
+    min_leadlag_corr,
+    max_per_engine,
+    max_per_asset_class,
+]:
+    w.observe(recompute, names="value")
+
+
+# -----------------------------------------------------------------------------
+# Layout
+# -----------------------------------------------------------------------------
+def hdr(t):
+    return widgets.HTML(
+        f"<div style='font:700 16px Inter,Arial;color:{TXT};margin:4px 0 8px'>{t}</div>"
+    )
+
+
+controls = widgets.HBox(
+    [
+        widgets.VBox([lookback_dd, iv_lo, iv_hi, min_vol_quality, exclude_stale_iv]),
+        widgets.VBox([z_corr, gap_sl, min_leadlag_corr, max_per_engine, max_per_asset_class]),
+        widgets.VBox([widgets.HBox([refresh_btn, recompute_btn])]),
+    ],
+    layout=widgets.Layout(
+        border=f"1px solid {GRID}",
+        border_radius="10px",
+        padding="12px",
+    ),
+)
+
+tab_ideas = widgets.VBox(
+    [
+        hdr("Trade Ideas"),
+        ideas_box,
+    ]
+)
+
+tab_iv = widgets.VBox(
+    [
+        hdr("Implied Vol"),
+        iv_table_box,
+        widgets.HTML("<br>"),
+        iv_drill_dd,
+        iv_chart_box,
+    ]
+)
+
+tab_corr = widgets.VBox(
+    [
+        hdr("Correlation"),
+        disloc_box,
+        widgets.HTML("<br>"),
+        widgets.HBox([pair_a_dd, pair_b_dd]),
+        corr_pair_box,
+        widgets.HTML("<br>"),
+        corr_heat_box,
+    ]
+)
+
+tabs = widgets.Tab(children=[tab_ideas, tab_iv, tab_corr])
+tabs.set_title(0, "Trade Ideas")
+tabs.set_title(1, "Implied Vol")
+tabs.set_title(2, "Correlation")
+
+header = widgets.HTML(
+    f"<div style='font:700 23px Inter,Segoe UI,Arial;color:{TXT}'>"
+    f"Commodities Signal Dashboard</div>"
+    f"<div style='font:400 12px Inter,Arial;color:{MUTED};padding:2px 0 8px'>"
+    f"IV: hist_put_imp_vol | realized: {RV_WINDOW}d | correlation: {CORR_WINDOW}d</div>"
+)
+
+ui = widgets.VBox([header, controls, status, tabs])
+
+refresh()
+ui
