@@ -1,9 +1,38 @@
-"""Generates trade_outcome_tracker.ipynb. Edit here, re-run, commit both."""
+"""Generates trade_outcome_tracker.ipynb.
+
+BQuant runs notebooks only — it cannot import a .py — so the tracker library in
+tracker_source.py is inlined into the notebook as a cell rather than imported.
+This script is the only place the two are joined: edit tracker_source.py or the
+cells below, re-run this, and commit the regenerated notebook.
+
+    python dev/build_notebook.py
+"""
 import json
+import os
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+OUT = os.path.join(ROOT, "trade_outcome_tracker.ipynb")
 
 md = lambda s: dict(cell_type="markdown", metadata={}, source=s.strip("\n").splitlines(keepends=True))
 code = lambda s: dict(cell_type="code", metadata={}, execution_count=None, outputs=[],
                       source=s.strip("\n").splitlines(keepends=True))
+
+
+def library_cell():
+    """tracker_source.py, wrapped as a notebook cell."""
+    with open(os.path.join(HERE, "tracker_source.py")) as fh:
+        src = fh.read()
+    header = (
+        "# =====================================================================\n"
+        "# TRACKER LIBRARY — generated, do not edit here\n"
+        "# =====================================================================\n"
+        "# Source of truth is dev/tracker_source.py; this cell is produced by\n"
+        "# dev/build_notebook.py. It lives inline because BQuant cannot import a\n"
+        "# .py file — this notebook plus the dashboard notebook is all you need.\n"
+        "# Run it once, then carry on to the next cell.\n\n")
+    return code(header + src.strip("\n"))
+
 
 cells = [
 md("""
@@ -25,33 +54,39 @@ the dashboard's UI — it re-runs the dashboard's own signal engines on truncate
 3. Mark each trade forward over the next `HORIZON` sessions, entry close to exit close, using the
    payoff that matches what the engine was betting on (see the notes at the bottom).
 
-**To run:** open in BQuant with `commodities_vol_rv_dashboard.ipynb` and `trade_tracker.py` in the
-same folder, then run every cell top to bottom. Nothing here writes to the dashboard.
+**To run in BQuant:** upload this notebook next to `commodities_vol_rv_dashboard.ipynb` and run
+every cell top to bottom. There is nothing else to install — no `.py` files, no imports beyond
+what the dashboard already uses. Nothing here writes to the dashboard.
+
+If you would rather not keep two notebooks, paste cells 1–7 of this one onto the end of the
+dashboard notebook instead; the setup cell detects that the engines are already defined and
+skips loading them from disk.
 """),
+
+library_cell(),
 
 code("""
 # =====================================================================
 # SETUP — reuse the dashboard's engines without touching the dashboard
 # =====================================================================
-# Execs only its CONFIG / ANALYTICS / DATA LAYER cells. The RENDERERS and
-# CONTROLS cells are skipped, so no widgets are built and no data is pulled
-# on import — the signals scored below are the same code the dashboard runs.
-import importlib, os, sys
-import numpy as np
-import pandas as pd
+# Two ways this can run, both handled here:
+#   * as its own notebook  -> find the dashboard .ipynb and exec its CONFIG /
+#     ANALYTICS / DATA LAYER cells into NS. Its RENDERERS and CONTROLS cells are
+#     skipped, so no widgets are built and no Bloomberg pull is triggered.
+#   * pasted into the dashboard notebook -> the engines are already defined, so
+#     NS is just this notebook's own namespace.
+# Either way the signals scored below come from the dashboard's own code.
 from IPython.display import HTML, display
 
-HERE = os.getcwd()
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
+if "build_signals" in globals():
+    NS = globals()
+    print("Using the engines already defined in this notebook.")
+else:
+    DASHBOARD = find_dashboard()
+    NS = load_dashboard(DASHBOARD)
+    print("Loaded %s (cells %s)." % (os.path.basename(DASHBOARD), NS["__loaded_cells__"]))
 
-import trade_tracker as tt
-importlib.reload(tt)
-
-DASHBOARD = os.path.join(HERE, "commodities_vol_rv_dashboard.ipynb")
-NS = tt.load_dashboard(DASHBOARD)
-print("Loaded dashboard cells %s — %d assets, %d with implied vol."
-      % (NS["__loaded_cells__"], len(NS["ALL_TICKERS"]), len(NS["IV_TICKERS"])))
+print("%d assets, %d with implied vol." % (len(NS["ALL_TICKERS"]), len(NS["IV_TICKERS"])))
 """),
 
 code("""
@@ -101,7 +136,7 @@ code("""
 # =====================================================================
 # RUN — replay, pick, score
 # =====================================================================
-TR = tt.Tracker(NS, horizon=HORIZON)
+TR = Tracker(NS, horizon=HORIZON)
 
 SIGNALS = TR.signals_asof(DATA["px"], DATA["iv"], CFG, AS_OF)
 print("%d signals were on the board on %s:" % (len(SIGNALS), AS_OF.date()))
@@ -110,7 +145,7 @@ if len(SIGNALS):
 
 RESULTS, SUMMARY = TR.run(DATA["px"], DATA["iv"], CFG, AS_OF, horizon=HORIZON,
                           top_n=TOP_N, engine_n=ENGINE_N, sectors=SECTORS, sector_n=SECTOR_N)
-display(HTML(tt.report_html(RESULTS, SUMMARY, CFG, theme=TR.theme)))
+display(HTML(report_html(RESULTS, SUMMARY, CFG, theme=TR.theme)))
 """),
 
 code("""
@@ -119,8 +154,8 @@ code("""
 # =====================================================================
 # run_<date>.csv is this replay; ledger.csv accumulates across replays so the
 # hit rate builds a sample over time. Re-running a date replaces its rows.
-print(tt.report_text(RESULTS, SUMMARY, CFG))
-path = tt.save_run(RESULTS)
+print(report_text(RESULTS, SUMMARY, CFG))
+path = save_run(RESULTS)
 print("\\nsaved -> %s" % path)
 """),
 
@@ -144,13 +179,13 @@ for k in range(1, WEEKS + 1):
     if r is None or r.empty:
         continue
     frames.append(r)
-    tt.save_run(r)
+    save_run(r)
     print("%s  %2d trades  hit %s" % (asof.date(), s["scored"],
           "%.0f%%" % s["hit"] if s["scored"] else "—"))
 
 if frames:
     POOLED = pd.concat(frames, ignore_index=True, sort=False)
-    PSUM = tt.summarize(POOLED, sectors=SECTORS)
+    PSUM = summarize(POOLED, sectors=SECTORS)
     print("\\npooled over %d weeks: %d trades, hit rate %.0f%%, avg confidence %.0f%% "
           "(calibration %+.0f pts)"
           % (len(frames), PSUM["scored"], PSUM["hit"], PSUM["avg_conf"], PSUM["calibration"]))
@@ -197,11 +232,18 @@ outcome is not simply "did the quote move".
 - `trade_journal/ledger.csv` is the running record. It carries the full reason text and trigger
   for every tracked trade, so a stale entry can always be traced back to what the dashboard said.
 
-### Verifying it without Bloomberg
+### Where the code lives
 
-`python test_trade_tracker.py` runs the whole replay → select → score → report path against a
-generated market, checks the P&L signs by recomputing them independently, and asserts that a
-replay cannot see data after its as-of date.
+The **TRACKER LIBRARY** cell above is the whole implementation, inlined so that this notebook and
+the dashboard notebook are the only two files BQuant needs. It is generated from
+`dev/tracker_source.py` in the repo by `python dev/build_notebook.py` — edit it there and
+regenerate rather than editing the cell, or the next rebuild will overwrite your changes. The
+`dev/` folder is developer tooling only; nothing in it has to be uploaded to BQuant.
+
+`python dev/test_tracker.py` runs the whole replay → select → score → report path against a
+generated market with no Bloomberg needed, checks the P&L signs by recomputing them
+independently, asserts a replay cannot see data after its as-of date, and executes this
+notebook's own cells so the inlined library cannot drift from its source.
 """),
 ]
 
@@ -210,7 +252,7 @@ nb = dict(cells=cells, metadata=dict(
     language_info=dict(name="python", version="3.11")),
     nbformat=4, nbformat_minor=5)
 
-with open("trade_outcome_tracker.ipynb", "w") as fh:
+with open(OUT, "w") as fh:
     json.dump(nb, fh, indent=1)
     fh.write("\n")
-print("wrote trade_outcome_tracker.ipynb — %d cells" % len(cells))
+print("wrote %s — %d cells" % (OUT, len(cells)))

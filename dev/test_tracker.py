@@ -18,10 +18,35 @@ import numpy as np
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+ROOT = os.path.dirname(HERE)
 
-DASHBOARD = os.path.join(HERE, "commodities_vol_rv_dashboard.ipynb")
-TRACKER_NB = os.path.join(HERE, "trade_outcome_tracker.ipynb")
+DASHBOARD = os.path.join(ROOT, "commodities_vol_rv_dashboard.ipynb")
+TRACKER_NB = os.path.join(ROOT, "trade_outcome_tracker.ipynb")
+
+
+def notebook_code_cells(path):
+    with open(path) as fh:
+        nb = json.load(fh)
+    return ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
+
+
+def load_inlined_library():
+    """Exec the notebook's TRACKER LIBRARY cell as if it were a module.
+
+    Deliberately not `import tracker_source`: what ships to BQuant is the copy
+    inlined in the notebook, so that copy is what gets tested.
+    """
+    cells = notebook_code_cells(TRACKER_NB)
+    lib = [c for c in cells if "TRACKER LIBRARY" in c[:400]]
+    assert len(lib) == 1, "expected exactly one library cell, found %d" % len(lib)
+    mod = types.ModuleType("tracker_inlined")
+    exec(compile(lib[0], "trade_outcome_tracker.ipynb#library", "exec"), mod.__dict__)
+
+    with open(os.path.join(HERE, "tracker_source.py")) as fh:
+        src = fh.read()
+    assert src.strip("\n") in lib[0], \
+        "the notebook's library cell is stale — re-run: python dev/build_notebook.py"
+    return mod
 
 
 # ---------------------------------------------------------------------------
@@ -239,42 +264,80 @@ def check_tracker(tt, ns):
 
 
 def check_notebook(tt, ns, px, iv):
-    """Execute the tracker notebook's code cells against the synthetic market."""
-    with open(TRACKER_NB) as fh:
-        nb = json.load(fh)
-    cells = [("".join(c["source"])) for c in nb["cells"] if c["cell_type"] == "code"]
-    # Run it from a scratch copy of the folder: the notebook locates its inputs
-    # relative to the working directory, and this keeps trade_journal/ out of
-    # the repo when the test runs.
+    """Execute the tracker notebook's code cells against the synthetic market.
+
+    This is what proves the shipped artefact works: the notebook has to find the
+    dashboard on its own and run with no .py file anywhere near it.
+    """
+    cells = notebook_code_cells(TRACKER_NB)
+    # A scratch folder holding only the dashboard notebook — no tracker_source.py,
+    # nothing on sys.path — so an accidental `import` would fail loudly here.
     sandbox = tempfile.mkdtemp(prefix="tracker-nb-")
-    for f in ("commodities_vol_rv_dashboard.ipynb", "trade_tracker.py"):
-        os.symlink(os.path.join(HERE, f), os.path.join(sandbox, f))
+    os.symlink(DASHBOARD, os.path.join(sandbox, os.path.basename(DASHBOARD)))
     g = {"__name__": "__nbtest__"}
+    cwd, path_before = os.getcwd(), list(sys.path)
+    os.chdir(sandbox)
+    sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") not in (HERE, ROOT)]
+    try:
+        for i, src in enumerate(cells):
+            exec(compile(src, "trade_outcome_tracker.ipynb#code%d" % i, "exec"), g)
+            if "NS" in g and "fetch_all" not in g.get("_patched", ()):
+                # swap the Bloomberg pull for the fixture as soon as NS exists
+                g["NS"]["fetch_all"] = lambda *a, **k: (px, iv, [], [])
+                g["_patched"] = ("fetch_all",)
+    finally:
+        os.chdir(cwd)
+        sys.path[:] = path_before
+
+    assert g["DASHBOARD"] == os.path.join(sandbox, os.path.basename(DASHBOARD)), \
+        "notebook did not locate the dashboard on its own: %s" % g.get("DASHBOARD")
+    assert not g["RESULTS"].empty and "hit" in g["SUMMARY"]
+    assert (g["RESULTS"]["outcome"] != "N.A.").all()
+    assert len(g["frames"]) >= 2, "multi-week replay produced nothing"
+    assert os.path.isdir(os.path.join(sandbox, "trade_journal")), "journal was not written"
+    print("notebook: %d code cells executed standalone, %d trades scored, %d weeks pooled"
+          % (len(cells), len(g["RESULTS"]), len(g["frames"])))
+
+
+def check_inline_mode(tt, px, iv):
+    """The other documented route: cells pasted onto the end of the dashboard.
+
+    The engines are then already in the namespace, so the setup cell must reuse
+    them and never go looking for a notebook on disk.
+    """
+    cells = notebook_code_cells(TRACKER_NB)
+    g = {"__name__": "__inline__"}
+    tt.load_dashboard(DASHBOARD, ns=g)          # stand in for the dashboard's own kernel
+    assert "build_signals" in g
+
+    sandbox = tempfile.mkdtemp(prefix="tracker-inline-")   # empty: nothing to find
     cwd = os.getcwd()
     os.chdir(sandbox)
     try:
         for i, src in enumerate(cells):
-            exec(compile(src, "trade_outcome_tracker.ipynb#code%d" % i, "exec"), g)
-            if i == 0:
-                # cell 0 loads the dashboard; swap the Bloomberg pull for the fixture
+            exec(compile(src, "trade_outcome_tracker.ipynb#inline%d" % i, "exec"), g)
+            if "NS" in g and "_patched" not in g:
                 g["NS"]["fetch_all"] = lambda *a, **k: (px, iv, [], [])
+                g["_patched"] = True
     finally:
         os.chdir(cwd)
-    assert not g["RESULTS"].empty and "hit" in g["SUMMARY"]
-    assert (g["RESULTS"]["outcome"] != "N.A.").all()
-    assert len(g["frames"]) >= 2, "multi-week replay produced nothing"
-    print("notebook: %d code cells executed, %d trades scored, %d weeks pooled"
-          % (len(cells), len(g["RESULTS"]), len(g["frames"])))
+
+    assert g["NS"] is g, "setup cell did not reuse the notebook's own namespace"
+    assert "DASHBOARD" not in g, "setup cell went looking for a file it did not need"
+    assert not g["RESULTS"].empty
+    print("inline mode: %d cells ran inside the dashboard's namespace, %d trades scored"
+          % (len(cells), len(g["RESULTS"])))
 
 
 def main():
     stub_bquant()
-    import trade_tracker as tt
+    tt = load_inlined_library()
     ns = tt.load_dashboard(DASHBOARD)
     print("loaded dashboard cells %s — %d assets, %d with IV"
           % (ns["__loaded_cells__"], len(ns["ALL_TICKERS"]), len(ns["IV_TICKERS"])))
     px, iv = check_tracker(tt, ns)
     check_notebook(tt, ns, px, iv)
+    check_inline_mode(tt, px, iv)
     print("\nALL CHECKS PASSED")
 
 
