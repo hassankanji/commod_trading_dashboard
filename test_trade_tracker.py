@@ -134,6 +134,17 @@ def check_tracker(tt, ns):
     assert n_sec >= min(tt.SECTOR_N, len(res)), "metals/energy quota not filled"
     print("\nmetals/energy trades tracked: %d" % n_sec)
 
+    # Every engine that fired must be represented, and every engine that did not
+    # must be reported as silent rather than quietly missing.
+    fired = set(sig["engine"])
+    tracked = set(res["engine"])
+    assert fired <= tracked, "engines with signals but no tracked trade: %s" % (fired - tracked)
+    assert set(summ["silent_engines"]) == set(tt.ENGINES) - fired, summ["silent_engines"]
+    assert set(summ["by_engine"]) == tracked
+    assert set(summ["by_engine"]) | set(summ["silent_engines"]) == set(tt.ENGINES)
+    print("engine coverage: %d/%d engines fired, all tracked; silent: %s"
+          % (len(fired), len(tt.ENGINES), ", ".join(summ["silent_engines"]) or "none"))
+
     # Every P&L recomputed independently from the raw frames.
     ivf = iv.reindex(close.index).ffill()
     entry, exit_ = res["entry_date"].iloc[0], res["exit_date"].iloc[0]
@@ -201,8 +212,8 @@ def check_tracker(tt, ns):
 
     # Sector quota: ask for a sector the top-5 misses and check the top-up.
     alt = ("Softs", "Livestock")
-    picks_alt = tr.select(sig, top_n=5, sectors=alt, sector_n=2)
-    quota = picks_alt[picks_alt["basis"] != "top confidence"]
+    picks_alt = tr.select(sig, top_n=5, sectors=alt, sector_n=2, engine_n=0)
+    quota = picks_alt[picks_alt["basis"] == "metals/energy quota"]
     assert len(picks_alt) > 5 and len(quota) >= 1, picks_alt[["engine", "side", "basis"]]
     assert all(any(c in alt for c in cs) for cs in quota["sectors"])
     pool = [r["conf"] for _, r in sig.iterrows()

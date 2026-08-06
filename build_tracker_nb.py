@@ -18,8 +18,10 @@ the dashboard's UI — it re-runs the dashboard's own signal engines on truncate
 1. Rewind the price/IV history to a past date `AS_OF` and re-run `build_signals`. Every engine
    reads the last row of each series, so a truncated frame reproduces exactly what the dashboard
    printed that day — confidence hit-rates included, with no look-ahead.
-2. Take the **5 highest-confidence** signals, then top up so at least **3 touch metals or energy**
-   even when nothing there scored well. Quota picks are labelled `QUOTA` in the report.
+2. Take the **5 highest-confidence** signals, then top up so **every engine that fired gets at
+   least one trade** (labelled `ENGINE`) and at least **3 trades touch metals or energy**
+   (labelled `SECTOR`) — even when nothing in those buckets scored well. Without the engine
+   pass, one engine's good week crowds the others out of the results entirely.
 3. Mark each trade forward over the next `HORIZON` sessions, entry close to exit close, using the
    payoff that matches what the engine was betting on (see the notes at the bottom).
 
@@ -78,8 +80,9 @@ close = DATA["px"]["close"]
 HORIZON  = 5                      # trading sessions held (one week)
 AS_OF    = close.index[-(HORIZON + 1)]   # replay date = one week back on the data's own calendar
 TOP_N    = 5                      # highest-confidence signals to track
+ENGINE_N = 1                      # ...topped up to this many per engine, so each one is judged
 SECTORS  = ("Energy", "Precious Metals", "Base Metals")
-SECTOR_N = 3                      # ...topped up to at least this many metals/energy trades
+SECTOR_N = 3                      # ...and to at least this many metals/energy trades
 
 # The dashboard's default control panel. Change these to score a different
 # configuration — e.g. lookback=504 for 2y percentiles, or min_conf=55 to
@@ -106,7 +109,7 @@ if len(SIGNALS):
     print(SIGNALS.groupby("engine").size().to_string())
 
 RESULTS, SUMMARY = TR.run(DATA["px"], DATA["iv"], CFG, AS_OF, horizon=HORIZON,
-                          top_n=TOP_N, sectors=SECTORS, sector_n=SECTOR_N)
+                          top_n=TOP_N, engine_n=ENGINE_N, sectors=SECTORS, sector_n=SECTOR_N)
 display(HTML(tt.report_html(RESULTS, SUMMARY, CFG, theme=TR.theme)))
 """),
 
@@ -137,7 +140,7 @@ for k in range(1, WEEKS + 1):
         break
     asof = close.index[i]
     r, s = TR.run(DATA["px"], DATA["iv"], CFG, asof, horizon=HORIZON,
-                  top_n=TOP_N, sectors=SECTORS, sector_n=SECTOR_N)
+                  top_n=TOP_N, engine_n=ENGINE_N, sectors=SECTORS, sector_n=SECTOR_N)
     if r is None or r.empty:
         continue
     frames.append(r)
@@ -181,6 +184,12 @@ outcome is not simply "did the quote move".
   Positive means the confidence scores were, if anything, conservative that week.
 - Vol trades are in vol points and price trades in percent, so the two average-P&L figures are
   not additive and should not be summed into a portfolio return.
+- Every engine that fired is guaranteed a trade, so the by-engine table is never empty for an
+  engine that had something to say. An engine with **no signals at all** that day is listed
+  separately as *no signals on this date* — a blank week is not a bad week.
+- Trades carrying an `ENGINE` or `SECTOR` badge got in on a quota, not on merit. They drag the
+  headline hit rate toward 50% by design; the *by how it was picked* table separates them from
+  the top-confidence picks so you can see both numbers.
 - One week is roughly five to eight trades. That is a log entry, not evidence: run the optional
   multi-week cell above before drawing any conclusion about an engine.
 - Trades whose legs cannot be resolved, or whose IV is missing at either end, are reported as

@@ -18,6 +18,15 @@ truncated frame. There is no look-ahead in the replay.
 
     signals_asof(T)  ->  pick trades  ->  score them over the next N sessions
 
+Which trades get tracked
+-----------------------
+The top TOP_N signals by confidence, then two top-up passes: one trade from
+every engine that fired, and enough metals/energy trades to reach SECTOR_N.
+The top-ups are what make the by-engine and by-sector breakdowns readable —
+without them a single engine's good week fills all five slots and the others
+never get a recorded outcome. They are labelled in the report so they can be
+separated from the picks that got in on merit.
+
 Outcome definitions, per engine
 -------------------------------
 Each engine bets on a different thing, so each gets the P&L that matches the
@@ -62,6 +71,7 @@ HORIZON_DAYS = 5                                     # one trading week
 TOP_N = 5                                            # highest-confidence picks
 SECTORS = ("Energy", "Precious Metals", "Base Metals")
 SECTOR_N = 3                                         # metals/energy floor
+ENGINE_N = 1                                         # trades tracked per engine, minimum
 
 VOL_ENGINES = ("IV mean-reversion", "Variance risk premium", "Vol dispersion (pairs)")
 
@@ -75,6 +85,9 @@ THEME = dict(BG="#0B0E14", PANEL="#151B26", GRID="#2C3644", TXT="#F2F6FC",
 ENGINE_COLOR = {"IV mean-reversion": "#4DB6FF", "Variance risk premium": "#FFC44D",
                 "Vol dispersion (pairs)": "#2FD9C6", "Correlation RV": "#C58CFF",
                 "Lead-lag catch-up": "#25D07A"}
+
+# The dashboard's five engines, in its own display order.
+ENGINES = tuple(ENGINE_COLOR)
 
 # Markers identifying the dashboard cells worth importing. The RENDERERS and
 # CONTROLS cells are skipped on purpose — they build widgets and fire a
@@ -203,18 +216,26 @@ class Tracker:
         return [self.ASSET_CLASS.get(tk, "Other") for tk, _ in legs]
 
     # -- selection ---------------------------------------------------------
-    def select(self, sig, top_n=TOP_N, sectors=SECTORS, sector_n=SECTOR_N):
-        """Top `top_n` by confidence, then top up so >= `sector_n` touch metals/energy.
+    def select(self, sig, top_n=TOP_N, sectors=SECTORS, sector_n=SECTOR_N,
+               engine_n=ENGINE_N, engines=None):
+        """Pick the trades to track, in three passes:
+
+        1. the `top_n` highest-confidence signals on the board;
+        2. top up to `engine_n` trades from every engine that fired, so each
+           engine has an outcome to be judged on rather than being crowded out
+           by whichever one happens to score highest that week;
+        3. top up so at least `sector_n` trades touch metals/energy.
 
         Deduped on the set of underlyings: the same asset flagged by two engines
         is one bet, not two, so only its higher-confidence version is tracked.
-        Sector top-ups are taken in confidence order *within* metals/energy —
-        they are included even when their confidence is poor, which is the
-        point: a coin-flip signal that the desk would still look at deserves a
-        recorded outcome.
+        Both top-ups take the best available within their bucket and are included
+        even when confidence is poor — that is the point. A coin-flip signal the
+        desk would still look at deserves a recorded outcome, and an engine only
+        looks good if you also count the weeks its best idea was mediocre.
         """
         if sig is None or sig.empty:
             return pd.DataFrame()
+        engines = tuple(engines) if engines is not None else ENGINES
         rows, seen = [], set()
 
         def add(r, basis):
@@ -232,6 +253,13 @@ class Tracker:
             if len(rows) >= top_n:
                 break
             add(r, "top confidence")
+
+        for eng in engines:
+            pool = sig[sig["engine"] == eng]
+            for _, r in pool.iterrows():
+                if sum(d["engine"] == eng for d in rows) >= engine_n:
+                    break
+                add(r, "engine coverage")
 
         def in_sector(d):
             return any(c in sectors for c in d["sectors"])
@@ -336,21 +364,31 @@ class Tracker:
 
     # -- one-shot ----------------------------------------------------------
     def run(self, px, iv, cfg, asof, horizon=None, top_n=TOP_N,
-            sectors=SECTORS, sector_n=SECTOR_N):
+            sectors=SECTORS, sector_n=SECTOR_N, engine_n=ENGINE_N, engines=None):
         """Replay `asof`, pick the trades, score them. -> (results, summary)."""
         sig = self.signals_asof(px, iv, cfg, asof)
-        picks = self.select(sig, top_n=top_n, sectors=sectors, sector_n=sector_n)
+        picks = self.select(sig, top_n=top_n, sectors=sectors, sector_n=sector_n,
+                            engine_n=engine_n, engines=engines)
         res = self.score(picks, px, iv, cfg, asof, horizon)
-        return res, summarize(res, sectors=sectors)
+        # An engine with nothing on the board is not the same as an engine that
+        # lost, so carry the silent ones into the report instead of letting them
+        # drop out of the breakdown.
+        fired = set(sig["engine"]) if sig is not None and not sig.empty else set()
+        silent = [e for e in (engines or ENGINES) if e not in fired]
+        return res, summarize(res, sectors=sectors, silent_engines=silent)
 
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
-def summarize(res, sectors=SECTORS):
-    """Hit rate overall / by engine / by basis, plus confidence calibration."""
+def summarize(res, sectors=SECTORS, silent_engines=()):
+    """Hit rate overall / by engine / by basis, plus confidence calibration.
+
+    `silent_engines` are engines that produced no signal at all on the replay
+    date — reported separately so a blank week is never read as a bad one.
+    """
     if res is None or res.empty:
-        return dict(n=0, scored=0)
+        return dict(n=0, scored=0, silent_engines=list(silent_engines))
     live = res[res["outcome"].isin(["WIN", "LOSS", "FLAT"])]
     wins = int((live["outcome"] == "WIN").sum())
     n = len(live)
@@ -365,7 +403,11 @@ def summarize(res, sectors=SECTORS):
                     vol_pnl=v.mean() if len(v) else np.nan,
                     px_pnl=p.mean() if len(p) else np.nan)
 
-    by_engine = {e: blk(live[live["engine"] == e]) for e in sorted(live["engine"].unique())}
+    # Keep the dashboard's engine order rather than alphabetical, and keep an
+    # engine that fired but went entirely unscored visible with n=0.
+    seen = [e for e in ENGINES if e in set(res["engine"])]
+    seen += [e for e in sorted(set(res["engine"])) if e not in ENGINES]
+    by_engine = {e: blk(live[live["engine"] == e]) for e in seen}
     by_basis = {b: blk(live[live["basis"] == b]) for b in sorted(live["basis"].unique())}
     in_sec = live[live["sectors"].apply(lambda cs: any(c in sectors for c in cs))]
 
@@ -376,6 +418,7 @@ def summarize(res, sectors=SECTORS):
              sessions=int(res["sessions"].iloc[0]),
              by_engine=by_engine, by_basis=by_basis,
              sector=blk(in_sec), overall=blk(live),
+             silent_engines=list(silent_engines),
              unscored=int(len(res) - n))
     s["calibration"] = (s["hit"] - s["avg_conf"]) if n else np.nan
     return s
@@ -431,6 +474,8 @@ def report_text(res, summary, cfg=None):
     for e, b in summary["by_engine"].items():
         L.append("    %-24s %d/%d  %s" % (e, b["wins"], b["n"],
                  "%.0f%%" % b["hit"] if b["n"] else "—"))
+    for e in summary.get("silent_engines", []):
+        L.append("    %-24s no signals on this date" % e)
     L.append("  by how it was picked:")
     for b_, b in summary["by_basis"].items():
         L.append("    %-24s %d/%d  %s" % (b_, b["wins"], b["n"],
@@ -496,9 +541,10 @@ def report_html(res, summary, cfg=None, theme=None):
     rows = ""
     for _, r in res.iterrows():
         ec = ENGINE_COLOR.get(r["engine"], T["MUTED"])
+        tag = {"engine coverage": "ENGINE", "metals/energy quota": "SECTOR"}.get(r["basis"])
         badge = ("<span style='font:700 9px Inter,Arial;color:%s;border:1px solid %s;"
                  "border-radius:4px;padding:1px 5px'>%s</span>"
-                 % (T["AMBER"], T["AMBER"], "QUOTA")) if r["basis"] != "top confidence" else ""
+                 % (T["AMBER"], T["AMBER"], tag)) if tag else ""
         rows += (
             "<tr style='border-top:1px solid %s'>"
             "<td style='padding:10px 12px;vertical-align:top;white-space:nowrap'>"
@@ -536,7 +582,7 @@ def report_html(res, summary, cfg=None, theme=None):
              % (T["PANEL"], T["GRID"], T["BG"], T["MUTED"], T["MUTED"], T["MUTED"],
                 T["MUTED"], rows))
 
-    def brk(title, mapping):
+    def brk(title, mapping, extra=""):
         items = "".join(
             "<div style='font:400 12px Inter,Arial;color:%s;padding:3px 0'>%s "
             "<b style='color:%s'>%d/%d</b> <span style='color:%s'>%s</span></div>"
@@ -545,12 +591,16 @@ def report_html(res, summary, cfg=None, theme=None):
                "%.0f%%" % b["hit"] if b["n"] else "—")
             for k, b in mapping.items())
         return ("<div style='min-width:260px'><div style='font:700 10px Inter,Arial;color:%s;"
-                "letter-spacing:.08em;padding-bottom:4px'>%s</div>%s</div>"
-                % (T["MUTED"], title.upper(), items))
+                "letter-spacing:.08em;padding-bottom:4px'>%s</div>%s%s</div>"
+                % (T["MUTED"], title.upper(), items, extra))
 
     sec = summary["sector"]
+    silent = "".join(
+        "<div style='font:400 12px Inter,Arial;color:%s;padding:3px 0'>%s "
+        "<span style='font:400 11px Inter,Arial'>no signals on this date</span></div>"
+        % (T["MUTED"], e) for e in summary.get("silent_engines", []))
     breakdown = ("<div style='display:flex;gap:28px;flex-wrap:wrap;margin-top:14px'>%s%s%s</div>"
-                 % (brk("By engine", summary["by_engine"]),
+                 % (brk("By engine", summary["by_engine"], silent),
                     brk("By how it was picked", summary["by_basis"]),
                     brk("Sector", {"Metals / energy": sec})))
 
