@@ -55,8 +55,6 @@ A "week" is HORIZON_DAYS trading sessions, not calendar days, so holidays
 don't silently shorten the holding period.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import re
@@ -94,6 +92,19 @@ ENGINES = tuple(ENGINE_COLOR)
 # Bloomberg pull on import.
 DASHBOARD_SECTIONS = ("CONFIG —", "ANALYTICS —", "DATA LAYER —")
 
+# A cell containing any of these builds or wires the UI: never exec it, whatever
+# its header says. `on_click` in particular is what triggers the Bloomberg pull.
+UI_MARKERS = ("widgets.Tab(", ".on_click(", ".observe(")
+
+# ...and these identify the cells we do want even if their headers were renamed.
+ENGINE_MARKERS = ("def build_signals", "bq = bql.Service()", "def fetch_all")
+
+
+def _wanted_cell(src, sections):
+    if any(u in src for u in UI_MARKERS):
+        return False
+    return any(s in src[:400] for s in sections) or any(k in src for k in ENGINE_MARKERS)
+
 
 def load_dashboard(path, ns=None, sections=DASHBOARD_SECTIONS):
     """Exec the dashboard notebook's non-UI code cells into a namespace dict."""
@@ -105,14 +116,71 @@ def load_dashboard(path, ns=None, sections=DASHBOARD_SECTIONS):
         if cell.get("cell_type") != "code":
             continue
         src = "".join(cell["source"])
-        if not any(s in src[:400] for s in sections):
+        if not _wanted_cell(src, sections):
             continue
         exec(compile(src, "%s#cell%d" % (os.path.basename(path), i), "exec"), ns)
         loaded.append(i)
-    if not loaded:
-        raise RuntimeError("No matching code cells found in %s" % path)
+    if "build_signals" not in ns:
+        raise RuntimeError(
+            "%s has no cell defining build_signals — is that the dashboard notebook?" % path)
     ns.setdefault("__loaded_cells__", loaded)
     return ns
+
+
+def _defines_engines(path):
+    try:
+        with open(path) as fh:
+            return "def build_signals" in fh.read()
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+
+
+def find_dashboard(preferred="commodities_vol_rv_dashboard.ipynb", extra_dirs=()):
+    """Locate the dashboard notebook on disk.
+
+    BQuant does not guarantee which directory a notebook's kernel starts in, so
+    rather than assuming a path this looks for any .ipynb that actually defines
+    build_signals — which survives the file being renamed or moved a folder up.
+    Searched: the working directory, its parents, the home directory, and one
+    level of subfolders under each.
+    """
+    cwd = os.getcwd()
+    roots, p = [cwd] + list(extra_dirs) + [os.path.expanduser("~")], cwd
+    for _ in range(3):
+        p = os.path.dirname(p) or os.sep
+        roots.append(p)
+
+    searched, hits = [], []
+    for root in roots:
+        if not root or not os.path.isdir(root) or root in searched:
+            continue
+        searched.append(root)
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            continue
+        dirs = [os.path.join(root, e) for e in entries
+                if not e.startswith(".") and os.path.isdir(os.path.join(root, e))]
+        for folder in [root] + dirs[:40]:
+            try:
+                names = sorted(os.listdir(folder))
+            except OSError:
+                continue
+            for fn in names:
+                if fn.endswith(".ipynb") and _defines_engines(os.path.join(folder, fn)):
+                    hits.append(os.path.join(folder, fn))
+
+    if not hits:
+        raise FileNotFoundError(
+            "Could not find the dashboard notebook (no .ipynb defining build_signals).\n"
+            "Searched: %s\n"
+            "Fix: put the dashboard notebook in the same folder as this one, or load it "
+            "explicitly with  NS = load_dashboard('/full/path/to/dashboard.ipynb')"
+            % ", ".join(searched))
+    for h in hits:
+        if os.path.basename(h) == preferred:
+            return h
+    return hits[0]
 
 
 # ---------------------------------------------------------------------------
