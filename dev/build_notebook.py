@@ -1,9 +1,10 @@
-"""Generates trade_outcome_tracker.ipynb.
+"""Generates strategy_backtest.ipynb.
 
-BQuant runs notebooks only — it cannot import a .py — so the tracker library in
-tracker_source.py is inlined into the notebook as a cell rather than imported.
-This script is the only place the two are joined: edit tracker_source.py or the
-cells below, re-run this, and commit the regenerated notebook.
+BQuant runs notebooks only — it cannot import a .py — so the libraries in
+tracker_source.py and backtest_source.py are inlined into the notebook as cells
+rather than imported. This script is the only place they are joined: edit the
+source files or the runner cells below, re-run this, and commit the regenerated
+notebook.
 
     python dev/build_notebook.py
 """
@@ -12,58 +13,61 @@ import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-OUT = os.path.join(ROOT, "trade_outcome_tracker.ipynb")
+OUT = os.path.join(ROOT, "strategy_backtest.ipynb")
 
 md = lambda s: dict(cell_type="markdown", metadata={}, source=s.strip("\n").splitlines(keepends=True))
 code = lambda s: dict(cell_type="code", metadata={}, execution_count=None, outputs=[],
                       source=s.strip("\n").splitlines(keepends=True))
 
 
-def library_cell():
-    """tracker_source.py, wrapped as a notebook cell."""
-    with open(os.path.join(HERE, "tracker_source.py")) as fh:
+def library_cell(filename, title, note):
+    """A source file, wrapped as a notebook cell."""
+    with open(os.path.join(HERE, filename)) as fh:
         src = fh.read()
     header = (
         "# =====================================================================\n"
-        "# TRACKER LIBRARY — generated, do not edit here\n"
+        "# %s — generated, do not edit here\n"
         "# =====================================================================\n"
-        "# Source of truth is dev/tracker_source.py; this cell is produced by\n"
+        "# Source of truth is dev/%s; this cell is produced by\n"
         "# dev/build_notebook.py. It lives inline because BQuant cannot import a\n"
         "# .py file — this notebook plus the dashboard notebook is all you need.\n"
-        "# Run it once, then carry on to the next cell.\n\n")
+        "# %s\n\n" % (title, filename, note))
     return code(header + src.strip("\n"))
 
 
 cells = [
 md("""
-# Trade-signal outcome tracker
+# Do these signals actually work?
 
-Separate from the dashboard on purpose. The dashboard says *what looks like a trade now*;
-this says *did the trades it flagged actually work*. It does not import, modify or depend on
-the dashboard's UI — it re-runs the dashboard's own signal engines on truncated data.
+A backtest of the dashboard's five signal engines over the past year. The dashboard says *what
+looks like a trade now*; this asks whether those calls were right, on the whole population of
+signals rather than a hand-picked few.
 
-**How it works**
+**Method.** Step through the year one week at a time. At each step, rewind the price and implied-vol
+history to that date and re-run the dashboard's own `build_signals`. Every engine reads the last
+row of each series, so a truncated frame reproduces exactly what the dashboard would have printed
+that day — confidence scores included — with no look-ahead. Every signal on the board is recorded,
+then marked forward over 5, 10 and 21 sessions.
 
-1. Rewind the price/IV history to a past date `AS_OF` and re-run `build_signals`. Every engine
-   reads the last row of each series, so a truncated frame reproduces exactly what the dashboard
-   printed that day — confidence hit-rates included, with no look-ahead.
-2. Take the **5 highest-confidence** signals, then top up so **every engine that fired gets at
-   least one trade** (labelled `ENGINE`) and at least **3 trades touch metals or energy**
-   (labelled `SECTOR`) — even when nothing in those buckets scored well. Without the engine
-   pass, one engine's good week crowds the others out of the results entirely.
-3. Mark each trade forward over the next `HORIZON` sessions, entry close to exit close, using the
-   payoff that matches what the engine was betting on (see the notes at the bottom).
+**No sizing.** Every trade is one unit and the headline number is a hit rate. That keeps the result
+about signal quality instead of about a position-sizing rule layered on top. Average P&L per trade
+is reported alongside, in each engine's own unit (vol points or percent).
+
+**The number that matters is the gap to baseline.** A hit rate alone proves nothing: "sell vol wins
+78% of the time" is unimpressive if implied vol exceeds subsequent realized vol 76% of the time
+anyway. So every trade is also scored as if it had been taken on *every* date in the sample,
+regardless of whether the engine fired. That unconditional rate is the baseline, and the distance
+between the two is the only thing that can fairly be called an edge.
 
 **To run in BQuant:** upload this notebook next to `commodities_vol_rv_dashboard.ipynb` and run
-every cell top to bottom. There is nothing else to install — no `.py` files, no imports beyond
-what the dashboard already uses. Nothing here writes to the dashboard.
-
-If you would rather not keep two notebooks, paste cells 1–7 of this one onto the end of the
-dashboard notebook instead; the setup cell detects that the engines are already defined and
-skips loading them from disk.
+every cell top to bottom. Nothing to install; nothing here writes to the dashboard. The Bloomberg
+pull takes a couple of minutes and the replay about a minute.
 """),
 
-library_cell(),
+library_cell("replay_source.py", "REPLAY LIBRARY",
+             "Point-in-time replay, leg resolution and trade marking. Run once."),
+library_cell("backtest_source.py", "BACKTEST LIBRARY",
+             "Baselines, statistics, charts and the written summary. Run once."),
 
 code("""
 # =====================================================================
@@ -75,7 +79,7 @@ code("""
 #     skipped, so no widgets are built and no Bloomberg pull is triggered.
 #   * pasted into the dashboard notebook -> the engines are already defined, so
 #     NS is just this notebook's own namespace.
-# Either way the signals scored below come from the dashboard's own code.
+# Either way the signals being tested are the dashboard's own code, not a copy.
 from IPython.display import HTML, display
 
 if "build_signals" in globals():
@@ -94,7 +98,7 @@ code("""
 # DATA — one Bloomberg pull, 3y of OHLC + implied vol
 # =====================================================================
 # Same fetch_all the dashboard uses. Takes a couple of minutes; the result is
-# cached in DATA so the cells below can be re-run freely.
+# cached in DATA so everything below can be re-run without pulling again.
 px, iv, px_fail, iv_fail = NS["fetch_all"]()
 DATA = dict(px=px, iv=iv)
 
@@ -108,20 +112,22 @@ if iv_fail:
 
 code("""
 # =====================================================================
-# SETTINGS — what to replay, and with which dashboard settings
+# SETTINGS
 # =====================================================================
 close = DATA["px"]["close"]
 
-HORIZON  = 5                      # trading sessions held (one week)
-AS_OF    = close.index[-(HORIZON + 1)]   # replay date = one week back on the data's own calendar
-TOP_N    = 5                      # highest-confidence signals to track
-ENGINE_N = 1                      # ...topped up to this many per engine, so each one is judged
-SECTORS  = ("Energy", "Precious Metals", "Base Metals")
-SECTOR_N = 3                      # ...and to at least this many metals/energy trades
+WEEKS    = 52                 # replays, walking back from the most recent data
+STEP     = 5                  # sessions between replays (5 = weekly)
+HORIZONS = (5, 10, 21)        # holding periods marked for every signal
+PRIMARY  = 5                  # the horizon the report headlines
 
-# The dashboard's default control panel. Change these to score a different
-# configuration — e.g. lookback=504 for 2y percentiles, or min_conf=55 to
-# replay only the ideas the panel would have shown above 55% confidence.
+# At STEP=5 the 5-session holds are consecutive and non-overlapping. Longer
+# horizons overlap each other by construction — they are shown to test whether
+# an edge survives a longer hold, not as extra independent evidence.
+
+# The dashboard's default control panel. Change these to backtest a different
+# configuration — lookback=504 for 2y percentiles, min_conf=55 to test only the
+# ideas the panel would have shown above 55% confidence, and so on.
 CFG = dict(lookback=252, lb_name="1y",
            rv_estimator="Yang-Zhang (OHLC)", rv_window=21,
            iv_lo=10, iv_hi=90, disp_z=2.0, corr_z=1.0,
@@ -129,121 +135,115 @@ CFG = dict(lookback=252, lb_name="1y",
            ll_window=NS["LEADLAG_WINDOW"], ll_r=0.30, ll_gap=1.5,
            min_quality="Fair", exclude_stale=True, min_conf=0)
 
-print("replaying %s, marking to %s" % (AS_OF.date(), close.index[-1].date()))
+TR = Tracker(NS, horizon=PRIMARY)
+dates = replay_dates(close, weeks=WEEKS, step=STEP)
+print("%d replays from %s to %s, holding %s sessions."
+      % (len(dates), dates[0].date(), dates[-1].date(), "/".join(str(h) for h in HORIZONS)))
 """),
 
 code("""
 # =====================================================================
-# RUN — replay, pick, score
+# RUN — replay the year (about a minute)
 # =====================================================================
-TR = Tracker(NS, horizon=HORIZON)
+def _progress(n, total, asof, k):
+    if n == 1 or n % 10 == 0 or n == total:
+        print("  %3d/%d   %s   %d signals" % (n, total, asof.date(), k))
 
-SIGNALS = TR.signals_asof(DATA["px"], DATA["iv"], CFG, AS_OF)
-print("%d signals were on the board on %s:" % (len(SIGNALS), AS_OF.date()))
-if len(SIGNALS):
-    print(SIGNALS.groupby("engine").size().to_string())
+MARKS = run_backtest(TR, DATA["px"], DATA["iv"], CFG, weeks=WEEKS, step=STEP,
+                     horizons=HORIZONS, progress=_progress)
 
-RESULTS, SUMMARY = TR.run(DATA["px"], DATA["iv"], CFG, AS_OF, horizon=HORIZON,
-                          top_n=TOP_N, engine_n=ENGINE_N, sectors=SECTORS, sector_n=SECTOR_N)
-display(HTML(report_html(RESULTS, SUMMARY, CFG, theme=TR.theme)))
+print("\\n%d marked trades across %d replay dates and %d horizons."
+      % (len(MARKS), MARKS["entry_date"].nunique(), MARKS["horizon"].nunique()))
 """),
 
 code("""
 # =====================================================================
-# SAVE — plain-text report + CSV journal
+# RESULTS — headline, takeaways, charts
 # =====================================================================
-# run_<date>.csv is this replay; ledger.csv accumulates across replays so the
-# hit rate builds a sample over time. Re-running a date replaces its rows.
-print(report_text(RESULTS, SUMMARY, CFG))
-path = save_run(RESULTS)
-print("\\nsaved -> %s" % path)
+display(HTML(report_html(MARKS, PRIMARY, CFG, theme=TR.theme)))
+display(fig_calibration(MARKS, PRIMARY, theme=TR.theme))
+display(fig_engines(MARKS, PRIMARY, theme=TR.theme))
+display(fig_equity(MARKS, PRIMARY, theme=TR.theme))
+display(fig_horizons(MARKS, theme=TR.theme))
+display(HTML(table_html(MARKS, PRIMARY, theme=TR.theme)))
 """),
 
 code("""
 # =====================================================================
-# OPTIONAL — walk several weeks back to build a real sample
+# EXPORT — one HTML file for the slides, one CSV for the numbers
 # =====================================================================
-# One week is five-ish trades: far too few to judge an engine. This replays the
-# last WEEKS non-overlapping weeks and pools them. Each replay only ever sees
-# data up to its own as-of date, so the pooled hit rate is still out-of-sample.
-WEEKS = 8
+# backtest_report.html is self-contained: open it, screenshot the charts you
+# want. backtest_marks.csv is every marked trade, so any number in the deck can
+# be traced back to the trades behind it.
+figs = [fig_calibration(MARKS, PRIMARY, theme=TR.theme),
+        fig_engines(MARKS, PRIMARY, theme=TR.theme),
+        fig_equity(MARKS, PRIMARY, theme=TR.theme),
+        fig_horizons(MARKS, theme=TR.theme)]
 
-frames = []
-for k in range(1, WEEKS + 1):
-    i = len(close) - 1 - k * HORIZON
-    if i < 400:                                   # need history for percentiles
-        break
-    asof = close.index[i]
-    r, s = TR.run(DATA["px"], DATA["iv"], CFG, asof, horizon=HORIZON,
-                  top_n=TOP_N, engine_n=ENGINE_N, sectors=SECTORS, sector_n=SECTOR_N)
-    if r is None or r.empty:
-        continue
-    frames.append(r)
-    save_run(r)
-    print("%s  %2d trades  hit %s" % (asof.date(), s["scored"],
-          "%.0f%%" % s["hit"] if s["scored"] else "—"))
+parts = [report_html(MARKS, PRIMARY, CFG, theme=TR.theme)]
+for i, f in enumerate(figs):
+    parts.append(f.to_html(full_html=False, include_plotlyjs=(True if i == 0 else False)))
+parts.append("<div style='padding:14px 0'>%s</div>" % table_html(MARKS, PRIMARY, theme=TR.theme))
 
-if frames:
-    POOLED = pd.concat(frames, ignore_index=True, sort=False)
-    PSUM = summarize(POOLED, sectors=SECTORS)
-    print("\\npooled over %d weeks: %d trades, hit rate %.0f%%, avg confidence %.0f%% "
-          "(calibration %+.0f pts)"
-          % (len(frames), PSUM["scored"], PSUM["hit"], PSUM["avg_conf"], PSUM["calibration"]))
-    for e, b in PSUM["by_engine"].items():
-        print("   %-24s %d/%d  %s" % (e, b["wins"], b["n"],
-              "%.0f%%" % b["hit"] if b["n"] else "—"))
+with open("backtest_report.html", "w") as fh:
+    fh.write("<html><body style='margin:0;background:#0B0E14;padding:16px'>%s</body></html>"
+             % "".join(parts))
+
+out = MARKS.drop(columns=[c for c in ("legs", "sectors") if c in MARKS.columns])
+out.to_csv("backtest_marks.csv", index=False)
+print("wrote backtest_report.html and backtest_marks.csv (%d rows)" % len(out))
+
+# The per-engine table as plain text, for pasting into slides or notes.
+print()
+print(table(MARKS, "engine", horizon=PRIMARY)[
+    ["engine", "n", "hit", "baseline", "lift", "p", "pnl", "unit"]].to_string(index=False))
 """),
 
 md("""
 ---
 ### How each trade is marked
 
-All marks are entry close to exit close, no costs, no sizing, equal notional on both legs of a
-pair. This measures whether the signal pointed the right way, not a tradable P&L.
+Entry close to exit close, no costs, equal notional on both legs of a pair, one unit per trade.
 
 | Engine | Wins when | P&L |
 |---|---|---|
 | IV mean-reversion | IV rises after BUY VOL, falls after SELL VOL | ±(IV_exit − IV_entry), vol pts |
-| Variance risk premium | realized vol over the week comes in under the implied quoted at entry (SELL VOL) | ±(IV_entry − RV_realized), vol pts |
+| Variance risk premium | realized vol over the hold comes in under the implied quoted at entry (SELL VOL) | ±(IV_entry − RV_realized), vol pts |
 | Vol dispersion | the rich/cheap IV spread converges | ΔIV_cheap − ΔIV_rich, vol pts |
 | Correlation RV | the laggard closes the gap on the outperformer | ret_long − ret_short, % |
 | Lead-lag catch-up | the follower moves the leader's way | ±ret_follower, % |
 
 Variance-risk-premium trades are marked against **delivered** volatility rather than the IV
-re-mark, because that is what an option seller is actually paid on. It is the one engine whose
-outcome is not simply "did the quote move".
+re-mark, because that is what an option seller is actually paid on.
 
-### Reading the numbers
+### Reading the charts
 
-- **Calibration** is realized hit rate minus the average confidence the engines predicted at entry.
-  Positive means the confidence scores were, if anything, conservative that week.
-- Vol trades are in vol points and price trades in percent, so the two average-P&L figures are
-  not additive and should not be summed into a portfolio return.
-- Every engine that fired is guaranteed a trade, so the by-engine table is never empty for an
-  engine that had something to say. An engine with **no signals at all** that day is listed
-  separately as *no signals on this date* — a blank week is not a bad week.
-- Trades carrying an `ENGINE` or `SECTOR` badge got in on a quota, not on merit. They drag the
-  headline hit rate toward 50% by design; the *by how it was picked* table separates them from
-  the top-confidence picks so you can see both numbers.
-- One week is roughly five to eight trades. That is a log entry, not evidence: run the optional
-  multi-week cell above before drawing any conclusion about an engine.
-- Trades whose legs cannot be resolved, or whose IV is missing at either end, are reported as
-  **N.A.** rather than silently dropped or marked at a guessed level.
-- `trade_journal/ledger.csv` is the running record. It carries the full reason text and trigger
-  for every tracked trade, so a stale entry can always be traced back to what the dashboard said.
+- **Calibration.** Bars are realized hit rates by confidence bucket, with 95% Wilson intervals.
+  Diamonds are the baseline for those same trades. A bucket only demonstrates skill to the extent
+  its bar clears its diamond — a tall bar sitting on a tall diamond is a bet that wins anyway.
+- **Engines.** Same idea per engine, with an exact binomial p-value against that engine's own
+  baseline. Wide intervals mean too few trades to tell, and are drawn rather than hidden.
+- **Cumulative wins − losses.** Unit-free, so engines marked in vol points and in percent share an
+  axis. A straight climb is a persistent edge; a single step is one lucky month.
+- **Horizons.** Edge over baseline at 5, 10 and 21 sessions. A real signal should not need a
+  specific holding period to work.
+
+### What this is not
+
+- **Not a P&L.** No sizing, costs, slippage, margin or option greeks. A vol-point move is not a
+  dollar, and a 55% hit rate on unsized bets does not mean 55% of anything is profit.
+- **Not independent draws.** A setup that stays extreme for a month is re-recorded every week, so
+  the trade count overstates the sample. Horizons longer than the replay step overlap outright.
+- **One year, one universe, one parameter set.** The confidence score is itself fitted on each
+  asset's own history, so a good calibration line says the score is internally consistent, not
+  that it will hold on new data.
 
 ### Where the code lives
 
-The **TRACKER LIBRARY** cell above is the whole implementation, inlined so that this notebook and
-the dashboard notebook are the only two files BQuant needs. It is generated from
-`dev/tracker_source.py` in the repo by `python dev/build_notebook.py` — edit it there and
-regenerate rather than editing the cell, or the next rebuild will overwrite your changes. The
-`dev/` folder is developer tooling only; nothing in it has to be uploaded to BQuant.
-
-`python dev/test_tracker.py` runs the whole replay → select → score → report path against a
-generated market with no Bloomberg needed, checks the P&L signs by recomputing them
-independently, asserts a replay cannot see data after its as-of date, and executes this
-notebook's own cells so the inlined library cannot drift from its source.
+The two library cells are generated from `dev/tracker_source.py` and `dev/backtest_source.py` by
+`python dev/build_notebook.py` — edit there and regenerate rather than editing the cells, or the
+next rebuild overwrites your changes. `python dev/test_tracker.py` runs the whole path against a
+generated market with no Bloomberg needed. Nothing in `dev/` needs to be uploaded to BQuant.
 """),
 ]
 
