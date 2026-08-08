@@ -1,14 +1,19 @@
-"""Self-test for the outcome tracker — runs anywhere, no Bloomberg needed.
+"""Self-test — runs anywhere, no Bloomberg needed.
 
 Stubs the BQuant-only imports, execs the dashboard's real CONFIG + ANALYTICS
 cells, and pushes a generated market through the whole
-replay -> select -> score -> report path. Also executes the tracker notebook's
-own code cells against that market, so the notebook cannot drift away from the
-module without this failing.
+replay -> mark -> backtest -> report path. Statistics are checked against hand
+values and baselines are recomputed straight from the raw frames, so a wrong
+number fails rather than merely looking plausible.
 
-    python test_trade_tracker.py
+It also executes the shipped notebook's own cells — from a folder containing
+nothing but the dashboard notebook — so the inlined libraries cannot drift from
+their sources and no hidden .py dependency can creep in.
+
+    python dev/test_tracker.py
 """
 import json
+import math
 import os
 import sys
 import tempfile
@@ -21,7 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 DASHBOARD = os.path.join(ROOT, "commodities_vol_rv_dashboard.ipynb")
-TRACKER_NB = os.path.join(ROOT, "trade_outcome_tracker.ipynb")
+TRACKER_NB = os.path.join(ROOT, "strategy_backtest.ipynb")
 
 
 def notebook_code_cells(path):
@@ -30,22 +35,27 @@ def notebook_code_cells(path):
     return ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
 
 
+LIBRARIES = [("REPLAY LIBRARY", "replay_source.py"),
+             ("BACKTEST LIBRARY", "backtest_source.py")]
+
+
 def load_inlined_library():
-    """Exec the notebook's TRACKER LIBRARY cell as if it were a module.
+    """Exec the notebook's library cells as one module.
 
     Deliberately not `import tracker_source`: what ships to BQuant is the copy
-    inlined in the notebook, so that copy is what gets tested.
+    inlined in the notebook, so that copy is what gets tested. The two cells
+    share a namespace in the notebook, so they share one here too.
     """
     cells = notebook_code_cells(TRACKER_NB)
-    lib = [c for c in cells if "TRACKER LIBRARY" in c[:400]]
-    assert len(lib) == 1, "expected exactly one library cell, found %d" % len(lib)
     mod = types.ModuleType("tracker_inlined")
-    exec(compile(lib[0], "trade_outcome_tracker.ipynb#library", "exec"), mod.__dict__)
-
-    with open(os.path.join(HERE, "tracker_source.py")) as fh:
-        src = fh.read()
-    assert src.strip("\n") in lib[0], \
-        "the notebook's library cell is stale — re-run: python dev/build_notebook.py"
+    for title, filename in LIBRARIES:
+        lib = [c for c in cells if title in c[:400]]
+        assert len(lib) == 1, "expected one %s cell, found %d" % (title, len(lib))
+        exec(compile(lib[0], "strategy_backtest.ipynb#%s" % filename, "exec"), mod.__dict__)
+        with open(os.path.join(HERE, filename)) as fh:
+            src = fh.read()
+        assert src.strip("\n") in lib[0], \
+            "%s is stale in the notebook — re-run: python dev/build_notebook.py" % filename
     return mod
 
 
@@ -64,20 +74,35 @@ def stub_bquant():
     bql.data = types.SimpleNamespace()
     sys.modules["bql"] = bql
 
+    # Stub plotly/ipywidgets only if they are genuinely absent. Where they are
+    # installed, use the real thing — the charts are a deliverable, and a stub
+    # would let a broken figure call pass the test.
+    missing = []
     for m in ["plotly", "plotly.graph_objects", "plotly.subplots", "ipywidgets"]:
+        try:
+            __import__(m)
+        except ImportError:
+            missing.append(m)
+    for m in missing:
         mod = types.ModuleType(m)
         mod.__getattr__ = lambda n: types.SimpleNamespace()
         sys.modules[m] = mod
-    sys.modules["plotly"].graph_objects = sys.modules["plotly.graph_objects"]
-    sys.modules["plotly"].subplots = sys.modules["plotly.subplots"]
+    if "plotly" in missing:
+        sys.modules["plotly"].graph_objects = sys.modules["plotly.graph_objects"]
+        sys.modules["plotly"].subplots = sys.modules["plotly.subplots"]
 
-    disp = types.ModuleType("IPython.display")
-    disp.HTML = lambda s: s
-    disp.display = lambda *a, **k: None
-    ipy = types.ModuleType("IPython")
-    ipy.display = disp
-    sys.modules.setdefault("IPython", ipy)
-    sys.modules.setdefault("IPython.display", disp)
+    try:
+        __import__("IPython.display")
+    except ImportError:
+        disp = types.ModuleType("IPython.display")
+        disp.HTML = lambda s: s
+        disp.display = lambda *a, **k: None
+        ipy = types.ModuleType("IPython")
+        ipy.display = disp
+        sys.modules["IPython"] = ipy
+        sys.modules["IPython.display"] = disp
+        missing.append("IPython.display")
+    return dict(stubbed=missing)
 
 
 def synthetic_market(ns, seed=7, start="2023-08-07", end="2026-08-06"):
@@ -134,7 +159,8 @@ def default_cfg(ns):
 
 
 # ---------------------------------------------------------------------------
-def check_tracker(tt, ns):
+def check_replay(tt, ns):
+    """The replay half: right signals, right legs, right marks, no look-ahead."""
     px, iv = synthetic_market(ns)
     close, cfg = px["close"], default_cfg(ns)
     tr = tt.Tracker(ns, horizon=5)
@@ -146,32 +172,18 @@ def check_tracker(tt, ns):
     print(sig.groupby("engine").size().to_string() if len(sig) else "  (none)")
     assert len(sig), "synthetic market produced no signals — the fixture is broken"
 
-    res, summ = tr.run(px, iv, cfg, asof)
-    print("\n" + tt.report_text(res, summ, cfg))
+    trades = tr.annotate(sig)
+    assert len(trades) == len(sig), "annotate dropped signals"
+    bad = trades[trades["kind"].isna()]
+    assert bad.empty, "legs unresolved: %s" % bad[["engine", "name", "side"]].to_dict("records")
 
-    assert len(res) >= 5, "expected at least the top-5 picks"
-    assert res["kind"].notna().all(), res[res["kind"].isna()][["engine", "name", "side"]]
+    res = tr.score(trades, px, iv, cfg, asof)
     assert (res["outcome"] != "N.A.").all(), res[res["outcome"] == "N.A."][["name", "note"]]
-    assert res["sessions"].iloc[0] == 5
-    assert res["entry_date"].iloc[0] == asof
-
-    n_sec = sum(any(c in tt.SECTORS for c in cs) for cs in res["sectors"])
-    assert n_sec >= min(tt.SECTOR_N, len(res)), "metals/energy quota not filled"
-    print("\nmetals/energy trades tracked: %d" % n_sec)
-
-    # Every engine that fired must be represented, and every engine that did not
-    # must be reported as silent rather than quietly missing.
-    fired = set(sig["engine"])
-    tracked = set(res["engine"])
-    assert fired <= tracked, "engines with signals but no tracked trade: %s" % (fired - tracked)
-    assert set(summ["silent_engines"]) == set(tt.ENGINES) - fired, summ["silent_engines"]
-    assert set(summ["by_engine"]) == tracked
-    assert set(summ["by_engine"]) | set(summ["silent_engines"]) == set(tt.ENGINES)
-    print("engine coverage: %d/%d engines fired, all tracked; silent: %s"
-          % (len(fired), len(tt.ENGINES), ", ".join(summ["silent_engines"]) or "none"))
+    assert (res["sessions"] == 5).all() and (res["entry_date"] == asof).all()
 
     # Every P&L recomputed independently from the raw frames.
     ivf = iv.reindex(close.index).ffill()
+    rv5 = tr.realized_vol(px, cfg["rv_estimator"], 5)
     entry, exit_ = res["entry_date"].iloc[0], res["exit_date"].iloc[0]
     checked = set()
     for _, r in res.iterrows():
@@ -181,8 +193,7 @@ def check_tracker(tt, ns):
             want = sgn * (ivf.at[exit_, tk] - ivf.at[entry, tk])
         elif k == "vol_single":                 # variance risk premium
             tk, sgn = r["legs"][0]
-            rvf = tr.realized_vol(px, cfg["rv_estimator"], 5)
-            want = sgn * (rvf.at[exit_, tk] - ivf.at[entry, tk])
+            want = sgn * (rv5.at[exit_, tk] - ivf.at[entry, tk])
         elif k == "vol_pair":
             (rich, _), (cheap, _) = r["legs"]
             want = ((ivf.at[exit_, cheap] - ivf.at[entry, cheap]) -
@@ -196,7 +207,8 @@ def check_tracker(tt, ns):
             want = sgn * (close.at[exit_, tk] / close.at[entry, tk] - 1) * 100
         assert abs(want - r["pnl"]) < 1e-9, (r["engine"], r["name"], want, r["pnl"])
         checked.add(k)
-    print("P&L independently reproduced for every trade (kinds: %s)" % ", ".join(sorted(checked)))
+    print("P&L independently reproduced for all %d trades (kinds: %s)"
+          % (len(res), ", ".join(sorted(checked))))
 
     # No look-ahead: truncating the frames at the as-of date changes nothing.
     sig_t = tr.signals_asof({k: v.loc[:asof] for k, v in px.items()}, iv.loc[:asof], cfg, asof)
@@ -205,15 +217,13 @@ def check_tracker(tt, ns):
     print("no-look-ahead: identical signals from truncated data")
 
     # An unseasoned replay reports OPEN rather than inventing a mark.
-    res_open, _ = tr.run(px, iv, cfg, close.index[-1])
-    assert (res_open["outcome"] == "OPEN").all(), res_open["outcome"].tolist()
+    last = tr.annotate(tr.signals_asof(px, iv, cfg, close.index[-1]))
+    res_open = tr.score(last, px, iv, cfg, close.index[-1])
+    assert (res_open["outcome"] == "OPEN").all(), res_open["outcome"].unique().tolist()
     print("unseasoned replay reported OPEN")
 
     # Leg parsing across every live signal, then against hand-built side strings
     # for the engines this tape happened not to fire.
-    bad = [(r["engine"], r["side"]) for _, r in sig.iterrows()
-           if not tr.legs(r["engine"], r["name"], r["side"])[1]]
-    assert not bad, bad
     nm = ns["NAME"]
     cases = [("Correlation RV", "Gold / Silver",
               "BUY %s / SELL %s" % (nm["GC1 Comdty"], nm["SI1 Comdty"]),
@@ -234,45 +244,119 @@ def check_tracker(tt, ns):
         assert tr.legs(eng, name, side) == (kind, legs), (eng, side)
     assert tr.legs("Correlation RV", "x / y", "BUY Nonexistent / SELL Gold") == (None, [])
     print("leg parsing: %d live signals + %d hand-built cases resolved" % (len(sig), len(cases)))
-
-    # Sector quota: ask for a sector the top-5 misses and check the top-up.
-    alt = ("Softs", "Livestock")
-    picks_alt = tr.select(sig, top_n=5, sectors=alt, sector_n=2, engine_n=0)
-    quota = picks_alt[picks_alt["basis"] == "metals/energy quota"]
-    assert len(picks_alt) > 5 and len(quota) >= 1, picks_alt[["engine", "side", "basis"]]
-    assert all(any(c in alt for c in cs) for cs in quota["sectors"])
-    pool = [r["conf"] for _, r in sig.iterrows()
-            if any(tr.ASSET_CLASS.get(t) in alt
-                   for t, _ in tr.legs(r["engine"], r["name"], r["side"])[1])]
-    assert quota["conf"].max() <= max(pool) + 1e-9, "quota did not take the best available"
-    print("sector quota added %d trade(s) from %s" % (len(quota), "/".join(alt)))
-
-    # Journal: writes, reloads, and replaces rather than duplicates.
-    tmp = tempfile.mkdtemp(prefix="tracker-selftest-")
-    out = os.path.join(tmp, "journal")
-    path = tt.save_run(res, out)
-    assert os.path.exists(path) and len(tt.load_ledger(out)) == len(res)
-    tt.save_run(res, out)
-    assert len(tt.load_ledger(out)) == len(res), "re-running a date duplicated the ledger"
-    print("journal round-trip ok -> %s" % path)
-
-    html = tt.report_html(res, summ, cfg)
-    assert "Trade-signal outcomes" in html and len(html) > 2000
-    open(os.path.join(tmp, "report.html"), "w").write(html)
-    print("html report ok (%d chars) -> %s" % (len(html), os.path.join(tmp, "report.html")))
     return px, iv
 
 
+def check_stats(tt):
+    """The statistics have known answers — check them against hand values."""
+    lo, hi = tt.wilson(50, 100)
+    assert abs(lo - 40.4) < 0.2 and abs(hi - 59.6) < 0.2, (lo, hi)
+    lo, hi = tt.wilson(1, 3)                     # tiny n must stay inside [0, 100]
+    assert 0 <= lo < hi <= 100
+
+    # P(X >= 50 | n=100, p=0.5) is just over a half; the extremes are exact.
+    assert abs(tt.binom_p(50, 100, 0.5) - 0.5398) < 0.001, tt.binom_p(50, 100, 0.5)
+    assert abs(tt.binom_p(100, 100, 0.5) - 0.5 ** 100) < 1e-30
+    assert abs(tt.binom_p(0, 100, 0.5, side="less") - 0.5 ** 100) < 1e-30
+    assert tt.binom_p(60, 100, 0.5) < 0.03 < tt.binom_p(55, 100, 0.5)
+    # The two tails must together account for the whole distribution plus the
+    # shared point mass at k.
+    k, n, p = 57, 100, 0.5
+    both = tt.binom_p(k, n, p) + tt.binom_p(k, n, p, side="less")
+    assert abs(both - (1 + math.exp(tt._log_binom_pmf(k, n, p)))) < 1e-9, both
+    print("statistics: Wilson intervals and exact binomial tails match hand values")
+
+
+def check_backtest(tt, ns, px, iv):
+    """Run a short backtest and verify the numbers it reports."""
+    cfg = default_cfg(ns)
+    tr = tt.Tracker(ns, horizon=5)
+    close = px["close"]
+    weeks, horizons = 10, (5, 21)
+    marks = tt.run_backtest(tr, px, iv, cfg, weeks=weeks, step=5, horizons=horizons)
+    assert not marks.empty
+    assert set(marks["horizon"]) == set(horizons)
+    assert marks["entry_date"].nunique() == weeks, marks["entry_date"].nunique()
+
+    # Every mark must be a real, closed, forward-looking hold.
+    assert (marks["exit_date"] > marks["entry_date"]).all()
+    assert (marks["exit_date"] <= close.index[-1]).all(), "marked past the end of the data"
+    for h in horizons:
+        sub = marks[marks["horizon"] == h]
+        gap = [close.index.get_loc(b) - close.index.get_loc(a)
+               for a, b in zip(sub["entry_date"], sub["exit_date"])]
+        assert set(gap) == {h}, "horizon %d held %s sessions" % (h, sorted(set(gap)))
+
+    # win/outcome/edge must agree with each other.
+    assert ((marks["win"] == 1) == (marks["outcome"] == "WIN")).all()
+    scored = marks[marks["baseline"].notna()]
+    assert len(scored) > 0.8 * len(marks), "too many baselines failed to compute"
+    assert np.allclose(scored["edge"], scored["win"] * 100.0 - scored["baseline"])
+
+    # Recompute one baseline by hand, straight from the raw frames.
+    ivf = iv.reindex(close.index).ffill()
+    row = marks[(marks["engine"] == "IV mean-reversion") & (marks["horizon"] == 5)
+                & marks["baseline"].notna()].iloc[0]
+    tk, sgn = row["legs"][0]
+    d = sgn * (ivf[tk].shift(-5) - ivf[tk])
+    want = float((d.dropna() > 0).mean() * 100.0)
+    assert abs(want - row["baseline"]) < 1e-9, (want, row["baseline"])
+
+    # ...and one for the variance risk premium, whose baseline is the whole point:
+    # implied at entry against the vol actually delivered, not against the re-mark.
+    vrp = marks[(marks["engine"] == "Variance risk premium") & (marks["horizon"] == 5)
+                & marks["baseline"].notna()]
+    assert len(vrp), "no VRP baselines computed"
+    row = vrp.iloc[0]
+    tk, sgn = row["legs"][0]
+    rv5 = tr.realized_vol(px, cfg["rv_estimator"], 5)
+    d = sgn * (rv5[tk].shift(-5) - ivf[tk])
+    want = float((d.dropna() > 0).mean() * 100.0)
+    assert abs(want - row["baseline"]) < 1e-9, (want, row["baseline"])
+
+    # Aggregation, calibration and the written summary.
+    tab = tt.table(marks, "engine", horizon=5)
+    assert set(["engine", "n", "hit", "lo", "hi", "baseline", "lift", "p"]) <= set(tab.columns)
+    assert (tab["n"] > 0).any() and (tab["lo"] <= tab["hit"]).all() and (tab["hit"] <= tab["hi"]).all()
+    assert abs(tab["n"].sum() - len(marks[marks["horizon"] == 5])) == 0
+
+    cal = tt.calibration(marks, 5)
+    assert len(cal) and cal["n"].sum() == len(marks[marks["horizon"] == 5])
+
+    hd = tt.headline(marks, 5)
+    assert 0 <= hd["hit"] <= 100 and hd["trades"] == len(marks[marks["horizon"] == 5])
+
+    eq = tt.equity(marks, 5)
+    assert len(eq) and eq.notna().all().all()
+
+    points = tt.takeaways(marks, 5)
+    assert len(points) >= 3 and all(isinstance(p, str) and len(p) > 20 for p in points)
+
+    # Charts must actually build — a stubbed plotly would hide a broken call.
+    for fig in (tt.fig_calibration(marks, 5), tt.fig_engines(marks, 5),
+                tt.fig_equity(marks, 5), tt.fig_horizons(marks)):
+        assert len(fig.data) >= 1 and fig.layout.title.text
+
+    html = tt.report_html(marks, 5, cfg) + tt.table_html(marks, 5)
+    assert "Do these signals actually work?" in html and len(html) > 3000
+
+    print("backtest: %d marks over %d dates × %d horizons; baselines, aggregation, "
+          "charts and takeaways verified" % (len(marks), weeks, len(horizons)))
+    for line in points:
+        print("   · %s" % line)
+    return marks
+
+
 def check_notebook(tt, ns, px, iv):
-    """Execute the tracker notebook's code cells against the synthetic market.
+    """Execute the backtest notebook's code cells against the synthetic market.
 
     This is what proves the shipped artefact works: the notebook has to find the
     dashboard on its own and run with no .py file anywhere near it.
     """
     cells = notebook_code_cells(TRACKER_NB)
-    # A scratch folder holding only the dashboard notebook — no tracker_source.py,
+    # A scratch folder holding only the dashboard notebook — no source .py files,
     # nothing on sys.path — so an accidental `import` would fail loudly here.
-    sandbox = tempfile.mkdtemp(prefix="tracker-nb-")
+    sandbox = tempfile.mkdtemp(prefix="backtest-nb-")
     os.symlink(DASHBOARD, os.path.join(sandbox, os.path.basename(DASHBOARD)))
     g = {"__name__": "__nbtest__"}
     cwd, path_before = os.getcwd(), list(sys.path)
@@ -280,23 +364,26 @@ def check_notebook(tt, ns, px, iv):
     sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") not in (HERE, ROOT)]
     try:
         for i, src in enumerate(cells):
-            exec(compile(src, "trade_outcome_tracker.ipynb#code%d" % i, "exec"), g)
-            if "NS" in g and "fetch_all" not in g.get("_patched", ()):
+            exec(compile(src, "strategy_backtest.ipynb#code%d" % i, "exec"), g)
+            if "NS" in g and "_data" not in g:
                 # swap the Bloomberg pull for the fixture as soon as NS exists
                 g["NS"]["fetch_all"] = lambda *a, **k: (px, iv, [], [])
-                g["_patched"] = ("fetch_all",)
+                g["_data"] = True
+            if "WEEKS" in g and "_weeks" not in g:
+                g["WEEKS"] = 8            # keep the test quick; the notebook ships with 52
+                g["_weeks"] = True
     finally:
         os.chdir(cwd)
         sys.path[:] = path_before
 
     assert g["DASHBOARD"] == os.path.join(sandbox, os.path.basename(DASHBOARD)), \
         "notebook did not locate the dashboard on its own: %s" % g.get("DASHBOARD")
-    assert not g["RESULTS"].empty and "hit" in g["SUMMARY"]
-    assert (g["RESULTS"]["outcome"] != "N.A.").all()
-    assert len(g["frames"]) >= 2, "multi-week replay produced nothing"
-    assert os.path.isdir(os.path.join(sandbox, "trade_journal")), "journal was not written"
-    print("notebook: %d code cells executed standalone, %d trades scored, %d weeks pooled"
-          % (len(cells), len(g["RESULTS"]), len(g["frames"])))
+    assert not g["MARKS"].empty and g["MARKS"]["entry_date"].nunique() == 8
+    for f in ("backtest_report.html", "backtest_marks.csv"):
+        p = os.path.join(sandbox, f)
+        assert os.path.exists(p) and os.path.getsize(p) > 2000, "%s not written" % f
+    print("notebook: %d code cells executed standalone, %d marks, exports written"
+          % (len(cells), len(g["MARKS"])))
 
 
 def check_inline_mode(tt, px, iv):
@@ -310,23 +397,26 @@ def check_inline_mode(tt, px, iv):
     tt.load_dashboard(DASHBOARD, ns=g)          # stand in for the dashboard's own kernel
     assert "build_signals" in g
 
-    sandbox = tempfile.mkdtemp(prefix="tracker-inline-")   # empty: nothing to find
+    sandbox = tempfile.mkdtemp(prefix="backtest-inline-")   # empty: nothing to find
     cwd = os.getcwd()
     os.chdir(sandbox)
     try:
         for i, src in enumerate(cells):
-            exec(compile(src, "trade_outcome_tracker.ipynb#inline%d" % i, "exec"), g)
-            if "NS" in g and "_patched" not in g:
+            exec(compile(src, "strategy_backtest.ipynb#inline%d" % i, "exec"), g)
+            if "NS" in g and "_data" not in g:
                 g["NS"]["fetch_all"] = lambda *a, **k: (px, iv, [], [])
-                g["_patched"] = True
+                g["_data"] = True
+            if "WEEKS" in g and "_weeks" not in g:
+                g["WEEKS"] = 4
+                g["_weeks"] = True
     finally:
         os.chdir(cwd)
 
     assert g["NS"] is g, "setup cell did not reuse the notebook's own namespace"
     assert "DASHBOARD" not in g, "setup cell went looking for a file it did not need"
-    assert not g["RESULTS"].empty
-    print("inline mode: %d cells ran inside the dashboard's namespace, %d trades scored"
-          % (len(cells), len(g["RESULTS"])))
+    assert not g["MARKS"].empty
+    print("inline mode: %d cells ran inside the dashboard's namespace, %d marks"
+          % (len(cells), len(g["MARKS"])))
 
 
 def main():
@@ -335,7 +425,9 @@ def main():
     ns = tt.load_dashboard(DASHBOARD)
     print("loaded dashboard cells %s — %d assets, %d with IV"
           % (ns["__loaded_cells__"], len(ns["ALL_TICKERS"]), len(ns["IV_TICKERS"])))
-    px, iv = check_tracker(tt, ns)
+    px, iv = check_replay(tt, ns)
+    check_stats(tt)
+    check_backtest(tt, ns, px, iv)
     check_notebook(tt, ns, px, iv)
     check_inline_mode(tt, px, iv)
     print("\nALL CHECKS PASSED")
