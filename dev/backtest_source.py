@@ -183,6 +183,19 @@ class Baselines:
 # ---------------------------------------------------------------------------
 # The backtest
 # ---------------------------------------------------------------------------
+def business_days_only(px, iv):
+    """Drop weekend rows so a 'session' really is a trading day.
+
+    The dashboard's fetch builds its index from the union of 29 instruments
+    across exchanges with different calendars, forward-filled, which can leave a
+    row on almost every calendar day. Horizons are counted in rows, so without
+    this a 5-row hold is about 3.5 trading days rather than a week.
+    """
+    keep = px["close"].index[px["close"].index.dayofweek < 5]
+    return ({k: v.loc[keep] for k, v in px.items()},
+            iv.reindex(keep) if iv is not None else iv)
+
+
 def replay_dates(close, weeks=DEFAULT_WEEKS, step=DEFAULT_STEP, end=None,
                  min_history=MIN_HISTORY):
     """As-of dates, oldest first. Each needs `min_history` sessions behind it."""
@@ -204,6 +217,14 @@ def run_backtest(tracker, px, iv, cfg, weeks=DEFAULT_WEEKS, step=DEFAULT_STEP,
     -> DataFrame, one row per (as-of date, signal, horizon).
     """
     close = px["close"]
+    weekend = int((close.index.dayofweek >= 5).sum())
+    if weekend > 0.05 * len(close):
+        print("Note: %d of %d rows in the price index fall on weekends, so horizons and the "
+              "replay step count CALENDAR days, not trading days — a '5-session' hold is about "
+              "%.1f trading days. Baselines use the same index, so the comparison is still "
+              "like-for-like, but say 'days' rather than 'sessions'. Pass px/iv through "
+              "business_days_only() first to work in trading days."
+              % (weekend, len(close), 5 * (1 - weekend / len(close)) * 7 / 5))
     ivf = iv.reindex(close.index).ffill()
     horizons = tuple(int(h) for h in horizons)
     rv_by_h = tracker.realized_by_horizon(px, cfg, horizons)   # once, not per replay
@@ -359,7 +380,20 @@ def takeaways(marks, horizon, max_points=6):
         lo, hi = cal.iloc[0], cal.iloc[-1]
         raw = hi["hit"] - lo["hit"]
         net = hi["lift"] - lo["lift"]
-        if not np.isfinite(net):
+        # Pooled buckets mix engines together, so a rising line can be nothing but
+        # engine composition: the high-confidence buckets fill up with whichever
+        # engines score high, and if those are also the engines that work, the
+        # score looks predictive without ordering anything inside an engine.
+        # Defer to the within-engine test whenever the two disagree.
+        within = conf_diagnostics(marks, h)
+        wgap = within["half_gap"]
+        if np.isfinite(net) and np.isfinite(wgap) and net > 3 and abs(wgap) < 2:
+            out.append("Confidence appears to rank trades — %s signals run %+.1f points of edge "
+                       "against %+.1f for %s — but that is engine composition, not the score "
+                       "working: within an engine, splitting at its own median confidence moves "
+                       "the edge by only %+.1f points. The score sorts engines, not trades."
+                       % (hi["conf_bin"], hi["lift"], lo["lift"], lo["conf_bin"], wgap))
+        elif not np.isfinite(net):
             out.append("Confidence buckets: %s hit %.1f%%, %s hit %.1f%% (%.1f-point spread)."
                        % (lo["conf_bin"], lo["hit"], hi["conf_bin"], hi["hit"], raw))
         elif abs(net) < 3:
@@ -738,6 +772,38 @@ def conf_filter(marks, horizon, thresholds=CONF_THRESHOLDS):
     return pd.DataFrame(rows, columns=cols)
 
 
+def filter_decomposition(marks, horizon, thresholds=CONF_THRESHOLDS):
+    """Split what a confidence filter buys into engine selection and real ranking.
+
+    Filtering on confidence quietly filters on engine: the high-confidence
+    buckets fill with whichever engines score high. So for each threshold this
+    computes the edge you would have got from the *same mix of engines* while
+    ignoring confidence entirely — take every trade those engines produced,
+    weighted as the filter weights them. Whatever the filter delivers beyond
+    that is the part attributable to confidence itself.
+
+    If the two columns are equal, the slider is an engine switch with extra
+    steps, and picking the engines directly does the same job without
+    discarding trades.
+    """
+    d = marks[marks["horizon"] == int(horizon)]
+    overall = {e: _block(sub)["lift"] for e, sub in d.groupby("engine")}
+    rows = []
+    for t in thresholds:
+        sub = d[d["conf"] >= t]
+        if sub.empty:
+            continue
+        mix = sub["engine"].value_counts(normalize=True)
+        from_engines = float(sum(w * overall.get(e, np.nan) for e, w in mix.items()))
+        actual = _block(sub)["lift"]
+        rows.append(dict(threshold=t, n=len(sub), kept=len(sub) / len(d) * 100.0,
+                         edge=actual, from_engine_mix=from_engines,
+                         from_confidence=actual - from_engines,
+                         engines=", ".join("%s %.0f%%" % (e, 100 * w)
+                                           for e, w in mix.head(3).items())))
+    return pd.DataFrame(rows)
+
+
 def conf_diagnostics(marks, horizon):
     """Does the confidence score rank outcomes? -> dict of the evidence."""
     d = marks[marks["horizon"] == int(horizon)].copy()
@@ -778,6 +844,7 @@ def conf_diagnostics(marks, horizon):
         out["half_gap"] = np.nan
 
     out["filter"] = conf_filter(marks, horizon)
+    out["decomposition"] = filter_decomposition(marks, horizon)
     out["by_engine"] = conf_by_engine(marks, horizon)
     out["calibration_error"] = float((d["conf"] - d["win"] * 100.0).mean())
     return out
@@ -814,6 +881,17 @@ def conf_takeaways(marks, horizon):
                    % (base["threshold"], top["threshold"], 100 - top["kept"],
                       base["lift"], top["lift"],
                       "nothing" if top["lift"] <= base["lift"] + 1 else "a little"))
+
+    dec = cd["decomposition"]
+    if len(dec) > 2:
+        best = dec.loc[dec["edge"].idxmax()]
+        out.append("Where that comes from: at a %d%% minimum the edge is %+.1f points, of which "
+                   "%+.1f is explained purely by which engines survive the filter and %+.1f by "
+                   "confidence ranking trades within them. The slider is an engine switch with "
+                   "extra steps — selecting the engines directly does the same job without "
+                   "discarding %.0f%% of the sample."
+                   % (best["threshold"], best["edge"], best["from_engine_mix"],
+                      best["from_confidence"], 100 - best["kept"]))
 
     err = cd["calibration_error"]
     if abs(err) > 3:

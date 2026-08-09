@@ -7,13 +7,21 @@ GREY, GRID, RED = "#525355", "#DCE1E7", "#D0021B"
 FONT = "SC Prosper Sans, Arial, Helvetica, sans-serif"
 
 # engine, trades, hit, ci_lo, ci_hi, baseline, edge, p, avg_conf
+# Real 5-day run: 2,102 marked trades, 52 replays, 2025-11-22 to 2026-08-09.
 DATA = [
-    ("IV mean-reversion",      290, 46.6, 41, 52, 44.6,  2.0, 0.266, 69),
-    ("Variance risk premium",  269, 59.9, 54, 66, 50.1,  9.8, 0.001, 57),
-    ("Vol dispersion (pairs)", 190, 58.4, 51, 65, 48.0, 10.4, 0.003, 64),
-    ("Correlation RV",         537, 50.5, 46, 55, 49.7,  0.8, 0.376, 51),
-    ("Lead-lag catch-up",      805, 50.8, 47, 54, 49.6,  1.2, 0.261, 51),
+    ("IV mean-reversion",      290, 51.0, 45, 57, 44.9,  6.1, 0.0206, 69),
+    ("Variance risk premium",  268, 61.2, 55, 67, 49.6, 11.6, 0.0001, 57),
+    ("Vol dispersion (pairs)", 201, 58.2, 51, 65, 48.2, 10.1, 0.0027, 64),
+    ("Correlation RV",         540, 49.1, 45, 53, 49.8, -0.7, 0.6432, 51),
+    ("Lead-lag catch-up",      803, 51.3, 48, 55, 49.7,  1.6, 0.1965, 51),
 ]
+
+# Pooled confidence buckets, and the within-engine comparison that reinterprets them.
+CALIB = [("<45", 359, 48.2, 46.0, 2.2), ("45-55", 811, 51.7, 49.1, 2.6),
+         ("55-65", 465, 53.1, 50.2, 3.0), ("65-75", 283, 58.3, 50.4, 7.9),
+         ("75+", 184, 55.4, 48.4, 7.0)]
+WITHIN = [("Low-confidence half<br>of each engine", 1103, 3.4),
+          ("High-confidence half<br>of each engine", 999, 4.0)]
 COLOR = {"IV mean-reversion": BLUE, "Variance risk premium": NAVY,
          "Vol dispersion (pairs)": LBLUE, "Correlation RV": GREEN,
          "Lead-lag catch-up": LGREEN}
@@ -51,7 +59,7 @@ def fig_engines():
                            text="<b style='color:%s'>%+.1f pts</b>   n=%d   p=%.3f"
                                 % (col, r[6], r[1], r[7]),
                            font=dict(color=GREY, size=12))
-    base(fig, "Two of the five engines beat doing nothing",
+    base(fig, "Three of the five engines beat doing nothing",
          "Bars: win rate with 95% confidence interval. Diamonds: the same trades taken on every "
          "date, signal or not. 5-session hold.", 470)
     fig.update_xaxes(range=[0, 143], tickvals=[0, 20, 40, 60, 80, 100],
@@ -61,35 +69,34 @@ def fig_engines():
     return fig
 
 
-def fig_conf_vs_edge():
-    fig = go.Figure()
-    for name, n, hit, lo, hi, bl, edge, p, conf in DATA:
-        fig.add_trace(go.Scatter(
-            x=[conf], y=[edge], mode="markers",
-            marker=dict(size=[max(16, min(46, n / 18.0))], color=COLOR[name],
-                        line=dict(color="#FFFFFF", width=2), opacity=0.95)))
-        # Correlation RV and Lead-lag sit almost on top of each other at ~51%
-        # confidence and ~+1 pt of edge, so their labels are placed by hand.
-        pos = {"Variance risk premium": (0, 30, "center"),
-               "Vol dispersion (pairs)": (0, -30, "center"),
-               "IV mean-reversion": (0, 28, "center"),
-               "Lead-lag catch-up": (-14, 34, "right"),
-               "Correlation RV": (-14, -26, "right")}[name]
-        fig.add_annotation(x=conf, y=edge, text=name, showarrow=False,
-                           xshift=pos[0], yshift=pos[1], xanchor=pos[2],
-                           font=dict(color=NAVY, size=13))
-    fig.add_hline(y=0, line=dict(color=GREY, width=1, dash="dot"))
-    base(fig, "The score the dashboard was most sure about had the least edge",
-         "Each bubble is one engine. Horizontal: average confidence the dashboard assigned. "
-         "Vertical: edge actually delivered over baseline. Bubble size: number of trades.", 470)
-    fig.update_layout(margin=dict(l=80, r=50, t=85, b=60),
-                      xaxis_title="average confidence at entry", yaxis_title="edge over baseline  (pts)")
-    fig.update_xaxes(range=[47.5, 73], ticksuffix="%")
-    fig.update_yaxes(range=[-2.5, 13.5])
+def fig_confidence():
+    """Pooled buckets rise; within engine the score is flat. That gap is the finding."""
+    from plotly.subplots import make_subplots
+    fig = make_subplots(rows=1, cols=2, column_widths=[0.62, 0.38], horizontal_spacing=0.13,
+                        subplot_titles=("Pooled across engines: edge rises with confidence",
+                                        "Within each engine: it does not"))
+    fig.add_trace(go.Bar(
+        x=[c[0] for c in CALIB], y=[c[4] for c in CALIB], marker_color=BLUE, width=0.62,
+        text=["%+.1f" % c[4] for c in CALIB], textposition="outside",
+        textfont=dict(color=NAVY, size=13), cliponaxis=False), row=1, col=1)
+    fig.add_trace(go.Bar(
+        x=[w[0] for w in WITHIN], y=[w[2] for w in WITHIN], marker_color=LBLUE, width=0.5,
+        text=["%+.1f" % w[2] for w in WITHIN], textposition="outside",
+        textfont=dict(color=NAVY, size=13), cliponaxis=False), row=1, col=2)
+    base(fig, "Confidence sorts engines, not trades",
+         "Edge over baseline, in percentage points. The left panel looks like a working score; "
+         "it is engine composition — the high buckets fill with the engines that work.", 470)
+    fig.update_layout(margin=dict(l=70, r=40, t=115, b=70), showlegend=False)
+    fig.update_yaxes(title_text="edge over baseline  (pts)", range=[0, 9.6], row=1, col=1)
+    fig.update_yaxes(range=[0, 9.6], row=1, col=2)
+    fig.update_xaxes(title_text="confidence bucket", row=1, col=1)
+    for a in fig.layout.annotations:
+        a.font.size = 14
+        a.font.color = GREY
     return fig
 
 
 if __name__ == "__main__":
-    for name, fig in [("engines", fig_engines()), ("conf_vs_edge", fig_conf_vs_edge())]:
+    for name, fig in [("engines", fig_engines()), ("confidence", fig_confidence())]:
         fig.write_html("/tmp/deck/assets/%s.html" % name, include_plotlyjs=True)
     print("ok")
