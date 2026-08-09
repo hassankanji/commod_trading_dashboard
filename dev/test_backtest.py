@@ -267,6 +267,10 @@ def check_stats(tt):
     print("statistics: Wilson intervals and exact binomial tails match hand values")
 
 
+def _block_hit(tt, marks, horizon=5):
+    return tt.headline(marks, horizon)["hit"]
+
+
 def check_backtest(tt, ns, px, iv):
     """Run a short backtest and verify the numbers it reports."""
     cfg = default_cfg(ns)
@@ -339,6 +343,42 @@ def check_backtest(tt, ns, px, iv):
 
     html = tt.report_html(marks, 5, cfg) + tt.table_html(marks, 5)
     assert "Do these signals actually work?" in html and len(html) > 3000
+
+    # Confidence diagnostics: the numbers have to agree with each other.
+    cd = tt.conf_diagnostics(marks, 5)
+    f = cd["filter"]
+    assert (f["n"].diff().dropna() <= 0).all(), "raising the threshold kept more trades"
+    assert f.iloc[0]["n"] == len(marks[marks["horizon"] == 5]), "no-filter row dropped trades"
+    for _, r in f.iterrows():
+        sub = marks[(marks["horizon"] == 5) & (marks["conf"] >= r["threshold"])]
+        assert r["n"] == len(sub) and abs(r["kept"] - 100.0 * len(sub) / f.iloc[0]["n"]) < 1e-9
+    ce = cd["by_engine"]
+    assert set(ce["engine"]) <= set(marks["engine"])
+    for _, r in ce.iterrows():
+        sub = marks[(marks["horizon"] == 5) & (marks["engine"] == r["engine"])
+                    & (marks["conf_bin"] == r["conf_bin"])]
+        assert r["n"] == len(sub), (r["engine"], r["conf_bin"], r["n"], len(sub))
+    for k in ("rank_raw", "rank_within", "rank_adjusted"):
+        assert cd[k] is not None and (np.isnan(cd[k]) or -1 <= cd[k] <= 1), (k, cd[k])
+    assert len(tt.conf_takeaways(marks, 5)) >= 2
+    for fig in (tt.fig_conf_by_engine(marks, 5), tt.fig_conf_filter(marks, 5)):
+        assert fig.layout.title.text
+    # ...and again in the Standard Chartered palette, which the deck exports use.
+    sc = tt.fig_engines(marks, 5, theme=tt.SC_THEME, colors=tt.SC_ENGINE_COLOR)
+    assert sc.layout.paper_bgcolor == tt.SC_THEME["BG"]
+
+    # The export pack must write something usable even with no PNG backend.
+    outdir = os.path.join(tempfile.mkdtemp(prefix="pack-"), "presentation")
+    files = tt.export_pack(marks, 5, cfg, outdir=outdir)
+    assert len(files) >= len(tt.FIGURES) + 6
+    for name, _, _ in tt.FIGURES:
+        assert os.path.exists(os.path.join(outdir, "%s.html" % name)), name
+    numbers = open(os.path.join(outdir, "NUMBERS.md")).read()
+    for heading in ("## Headline", "## By engine", "## Confidence calibration",
+                    "## Does confidence rank outcomes?", "## How to read these numbers"):
+        assert heading in numbers, heading
+    assert "%.1f%%" % _block_hit(tt, marks) in numbers, "headline hit rate missing from NUMBERS.md"
+    print("confidence diagnostics + export pack verified (%d files)" % len(files))
 
     print("backtest: %d marks over %d dates × %d horizons; baselines, aggregation, "
           "charts and takeaways verified" % (len(marks), weeks, len(horizons)))

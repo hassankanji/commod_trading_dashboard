@@ -170,6 +170,25 @@ display(HTML(table_html(MARKS, PRIMARY, theme=TR.theme)))
 
 code("""
 # =====================================================================
+# CONFIDENCE — is the score worth having?
+# =====================================================================
+# The dashboard attaches a confidence % to every idea. Two separate questions:
+# does it get the LEVEL right, and does it RANK — do higher-confidence signals
+# actually do better? Only the second one matters, and it has to be asked within
+# an engine, because engine identity drives confidence and outcome at once.
+display(fig_conf_by_engine(MARKS, PRIMARY, theme=TR.theme))
+display(fig_conf_filter(MARKS, PRIMARY, theme=TR.theme))
+
+for line in conf_takeaways(MARKS, PRIMARY):
+    print("· %s\\n" % line)
+
+CONF = conf_diagnostics(MARKS, PRIMARY)
+print(CONF["filter"][["threshold", "n", "kept", "hit", "baseline", "lift", "p"]]
+      .to_string(index=False))
+"""),
+
+code("""
+# =====================================================================
 # EXPORT — one HTML file for the slides, one CSV for the numbers
 # =====================================================================
 # backtest_report.html is self-contained: open it, screenshot the charts you
@@ -197,6 +216,20 @@ print("wrote backtest_report.html and backtest_marks.csv (%d rows)" % len(out))
 print()
 print(table(MARKS, "engine", horizon=PRIMARY)[
     ["engine", "n", "hit", "baseline", "lift", "p", "pnl", "unit"]].to_string(index=False))
+"""),
+
+code("""
+# =====================================================================
+# PRESENTATION PACK — charts, tables and every number, for the slides
+# =====================================================================
+# Writes to presentation/: six charts in the Standard Chartered palette on a
+# white ground (PNG where kaleido is available, self-contained HTML either way),
+# the tables as CSV, every marked trade, and NUMBERS.md — one readable file
+# holding every figure a slide might quote, with the method that produced it.
+PACK = export_pack(MARKS, PRIMARY, CFG, outdir="presentation")
+
+print()
+print(open("presentation/NUMBERS.md").read()[:1800])
 """),
 
 md("""

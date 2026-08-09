@@ -417,14 +417,31 @@ except NameError:
 
 FONT = "Inter, Segoe UI, Arial"
 
+# Standard Chartered "Prosper" palette, for charts that go into the deck: white
+# ground, navy headings, and the brand accents for series. Pass as
+# theme=SC_THEME, colors=SC_ENGINE_COLOR.
+SC_THEME = dict(BG="#FFFFFF", PANEL="#F7F8FA", GRID="#DCE1E7", TXT="#020B43", MUTED="#525355",
+                GREEN="#1E9E00", RED="#D0021B", AMBER="#B8860B",
+                BLUE="#0473EA", PURPLE="#7BB6F5", TEAL="#92E773",
+                FONT="SC Prosper Sans, Segoe UI, Arial")
+
+SC_ENGINE_COLOR = {"IV mean-reversion": "#0473EA", "Variance risk premium": "#020B43",
+                   "Vol dispersion (pairs)": "#7BB6F5", "Correlation RV": "#38D200",
+                   "Lead-lag catch-up": "#92E773"}
+
+
+def _ec(colors):
+    return colors or ENGINE_COLOR
+
 
 def _layout(fig, T, title, sub="", height=420, **kw):
+    font = T.get("FONT", FONT)
     fig.update_layout(
         title=dict(text="<b>%s</b>%s" % (title, "<br><span style='font-size:12px;color:%s'>%s</span>"
                                          % (T["MUTED"], sub) if sub else ""),
-                   font=dict(size=17, color=T["TXT"], family=FONT), x=0, xanchor="left"),
+                   font=dict(size=17, color=T["TXT"], family=font), x=0, xanchor="left"),
         paper_bgcolor=T["BG"], plot_bgcolor=T["BG"], height=height,
-        font=dict(family=FONT, color=T["MUTED"], size=12),
+        font=dict(family=font, color=T["MUTED"], size=12),
         margin=dict(l=60, r=30, t=70 if sub else 55, b=45),
         legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=T["MUTED"])), **kw)
     fig.update_xaxes(gridcolor=T["GRID"], zerolinecolor=T["GRID"], linecolor=T["GRID"])
@@ -432,11 +449,12 @@ def _layout(fig, T, title, sub="", height=420, **kw):
     return fig
 
 
-def _err(tab):
+def _err(tab, T=None):
+    T = T or THEME
     return dict(type="data", symmetric=False,
                 array=(tab["hi"] - tab["hit"]).tolist(),
                 arrayminus=(tab["hit"] - tab["lo"]).tolist(),
-                color=THEME["MUTED"], thickness=1.2, width=4)
+                color=T["MUTED"], thickness=1.2, width=4)
 
 
 def fig_calibration(marks, horizon, theme=None):
@@ -445,7 +463,7 @@ def fig_calibration(marks, horizon, theme=None):
     cal = calibration(marks, horizon)
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=cal["conf_bin"].astype(str), y=cal["hit"], error_y=_err(cal),
+        x=cal["conf_bin"].astype(str), y=cal["hit"], error_y=_err(cal, T),
         marker_color=[T["GREEN"] if l > 0 else T["RED"] for l in cal["lift"].fillna(0)],
         text=["n=%d" % n for n in cal["n"]], textposition="inside",
         insidetextanchor="start",           # sits at the foot of the bar, clear of the whiskers
@@ -470,7 +488,7 @@ def fig_calibration(marks, horizon, theme=None):
     return fig
 
 
-def fig_engines(marks, horizon, theme=None):
+def fig_engines(marks, horizon, theme=None, colors=None):
     """Per-engine verdict: hit rate against its own baseline, with intervals."""
     T = dict(THEME, **(theme or {}))
     tab = table(marks, "engine", horizon=horizon,
@@ -479,7 +497,7 @@ def fig_engines(marks, horizon, theme=None):
     fig = go.Figure()
     fig.add_trace(go.Bar(
         y=tab["engine"], x=tab["hit"], orientation="h",
-        marker_color=[ENGINE_COLOR.get(e, T["BLUE"]) for e in tab["engine"]],
+        marker_color=[_ec(colors).get(e, T["BLUE"]) for e in tab["engine"]],
         error_x=dict(type="data", symmetric=False,
                      array=(tab["hi"] - tab["hit"]).tolist(),
                      arrayminus=(tab["hit"] - tab["lo"]).tolist(),
@@ -515,7 +533,7 @@ def fig_engines(marks, horizon, theme=None):
     return fig
 
 
-def fig_equity(marks, horizon, theme=None):
+def fig_equity(marks, horizon, theme=None, colors=None):
     """Cumulative net wins through the year — is the edge steady or one lucky patch?"""
     T = dict(THEME, **(theme or {}))
     eq = equity(marks, horizon)
@@ -523,7 +541,7 @@ def fig_equity(marks, horizon, theme=None):
     for col in eq.columns:
         fig.add_trace(go.Scatter(
             x=eq.index, y=eq[col], mode="lines", name=col,
-            line=dict(color=ENGINE_COLOR.get(col, T["BLUE"]), width=2),
+            line=dict(color=_ec(colors).get(col, T["BLUE"]), width=2),
             hovertemplate="%{x|%d %b %Y}<br>" + col + " %{y:+.0f}<extra></extra>"))
     fig.add_hline(y=0, line=dict(color=T["MUTED"], width=1, dash="dot"))
     _layout(fig, T, "Is the edge steady, or one good month?",
@@ -533,7 +551,7 @@ def fig_equity(marks, horizon, theme=None):
     return fig
 
 
-def fig_horizons(marks, theme=None):
+def fig_horizons(marks, theme=None, colors=None):
     """Does the edge survive holding longer?"""
     T = dict(THEME, **(theme or {}))
     hs = sorted(marks["horizon"].unique())
@@ -558,6 +576,7 @@ def fig_horizons(marks, theme=None):
 # ---------------------------------------------------------------------------
 def cards_html(marks, horizon, theme=None):
     T = dict(THEME, **(theme or {}))
+    FONT = T.get("FONT", globals()["FONT"])
     h = headline(marks, horizon)
     eng = table(marks, "engine", horizon=horizon).sort_values("lift", ascending=False)
     best = eng.iloc[0] if len(eng) else None
@@ -591,6 +610,7 @@ def cards_html(marks, horizon, theme=None):
 def report_html(marks, horizon, cfg=None, theme=None):
     """Header, cards and the auto-written takeaways — everything but the charts."""
     T = dict(THEME, **(theme or {}))
+    FONT = T.get("FONT", globals()["FONT"])
     h = headline(marks, horizon)
     points = "".join(
         "<li style='margin:5px 0;line-height:1.55'>%s</li>" % p
@@ -617,9 +637,10 @@ def report_html(marks, horizon, cfg=None, theme=None):
            cards_html(marks, horizon, theme), FONT, T["MUTED"], FONT, T["TXT"], points, setting))
 
 
-def table_html(marks, horizon, theme=None):
+def table_html(marks, horizon, theme=None, colors=None):
     """Per-engine numbers as a table, for the slide that needs figures not shapes."""
     T = dict(THEME, **(theme or {}))
+    FONT = T.get("FONT", globals()["FONT"])
     tab = table(marks, "engine", horizon=horizon,
                 order=[e for e in ENGINES if e in set(marks["engine"])])
     tab = tab[tab["n"] > 0]
@@ -649,3 +670,408 @@ def table_html(marks, horizon, theme=None):
     return ("<table style='border-collapse:collapse;width:100%%;background:%s;border:1px solid %s;"
             "border-radius:10px;overflow:hidden'><tr style='background:%s'>%s</tr>%s</table>"
             % (T["PANEL"], T["GRID"], T["BG"], th, rows))
+
+
+# ---------------------------------------------------------------------------
+# Confidence diagnostics — is the score worth having?
+# ---------------------------------------------------------------------------
+# The dashboard's confidence % is an in-sample hit rate: "on past days when this
+# setup was at least this extreme, how often did the bet work". Two things can
+# be wrong with it, and they need separating.
+#
+#   1. LEVEL. It can promise 69% and deliver 47%. That is miscalibration, and it
+#      is mostly harmless — a number that is uniformly too high still ranks.
+#   2. RANKING. Higher-confidence signals may not do any better than lower ones.
+#      That is the fatal one: if the score cannot order outcomes, filtering on it
+#      does nothing and it should not be steering anybody's attention.
+#
+# Comparing engines confuses both questions, because engine identity drives
+# confidence and outcome at once — an engine with a rich base rate posts high
+# confidence *and* high hit rates without any skill being involved. So the test
+# that matters is WITHIN engine, and against baseline rather than against zero.
+# ---------------------------------------------------------------------------
+CONF_THRESHOLDS = (0, 45, 50, 55, 60, 65, 70, 75)
+
+
+def _spearman(a, b):
+    a, b = pd.Series(a).astype(float), pd.Series(b).astype(float)
+    ok = a.notna() & b.notna()
+    if ok.sum() < 20 or a[ok].nunique() < 3:
+        return np.nan
+    return float(a[ok].rank().corr(b[ok].rank()))
+
+
+def conf_by_engine(marks, horizon):
+    """Edge over baseline per engine per confidence bucket."""
+    d = marks[marks["horizon"] == int(horizon)]
+    rows = []
+    for eng in [e for e in ENGINES if e in set(d["engine"])]:
+        sub = d[d["engine"] == eng]
+        for b in CONF_LABELS:
+            part = sub[sub["conf_bin"] == b]
+            if part.empty:
+                continue
+            r = _block(part)
+            r.update(engine=eng, conf_bin=b)
+            rows.append(r)
+    cols = ["engine", "conf_bin", "n", "wins", "hit", "baseline", "lift", "p", "conf"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def conf_filter(marks, horizon, thresholds=CONF_THRESHOLDS):
+    """What filtering on the dashboard's 'min confidence' slider would have done.
+
+    This is the practical question: raising the slider throws trades away, so it
+    has to buy a better edge on what is left. If the edge column is flat as the
+    threshold rises, the filter costs sample and returns nothing.
+    """
+    d = marks[marks["horizon"] == int(horizon)]
+    rows = []
+    for t in thresholds:
+        sub = d[d["conf"] >= t]
+        if sub.empty:
+            continue
+        r = _block(sub)
+        r.update(threshold=t, kept=len(sub) / len(d) * 100.0)
+        rows.append(r)
+    cols = ["threshold", "n", "kept", "hit", "lo", "hi", "baseline", "lift", "p"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def conf_diagnostics(marks, horizon):
+    """Does the confidence score rank outcomes? -> dict of the evidence."""
+    d = marks[marks["horizon"] == int(horizon)].copy()
+    out = {}
+
+    # Pooled across engines, then within each engine, then against baseline.
+    out["rank_raw"] = _spearman(d["conf"], d["win"])
+    per_engine, weights = {}, {}
+    for eng, sub in d.groupby("engine"):
+        per_engine[eng] = _spearman(sub["conf"], sub["win"])
+        weights[eng] = len(sub)
+    out["rank_by_engine"] = per_engine
+    ok = {e: v for e, v in per_engine.items() if np.isfinite(v)}
+    out["rank_within"] = (sum(v * weights[e] for e, v in ok.items()) / sum(weights[e] for e in ok)
+                          if ok else np.nan)
+
+    # The score bundles the base rate in with the skill. Netting the baseline out
+    # asks whether what is left ranks anything. Diagnostic only: the baseline is
+    # computed over the whole sample, so this is not a score you could have
+    # traded — it needs a point-in-time base rate to be deployable.
+    d["conf_adj"] = d["conf"] - d["baseline"]
+    out["rank_adjusted"] = _spearman(d["conf_adj"], d["win"])
+
+    # Top versus bottom half of confidence, within engine, measured in edge.
+    tops, bots = [], []
+    for _, sub in d.groupby("engine"):
+        if len(sub) < 40 or sub["conf"].nunique() < 4:
+            continue
+        cut = sub["conf"].median()
+        tops.append(sub[sub["conf"] > cut])
+        bots.append(sub[sub["conf"] <= cut])
+    if tops and bots:
+        hi, lo = _block(pd.concat(tops)), _block(pd.concat(bots))
+        out["top_half"], out["bottom_half"] = hi, lo
+        out["half_gap"] = hi["lift"] - lo["lift"]
+    else:
+        out["top_half"] = out["bottom_half"] = None
+        out["half_gap"] = np.nan
+
+    out["filter"] = conf_filter(marks, horizon)
+    out["by_engine"] = conf_by_engine(marks, horizon)
+    out["calibration_error"] = float((d["conf"] - d["win"] * 100.0).mean())
+    return out
+
+
+def conf_takeaways(marks, horizon):
+    """The confidence verdict in plain English, and what to do about it."""
+    cd = conf_diagnostics(marks, horizon)
+    out = []
+    r = cd["rank_within"]
+    gap = cd["half_gap"]
+
+    if np.isfinite(r):
+        if abs(r) < 0.05:
+            out.append("Within an engine, confidence does not rank outcomes: the rank correlation "
+                       "between the score and whether the trade worked is %+.3f — indistinguishable "
+                       "from none." % r)
+        else:
+            out.append("Within an engine, confidence ranks outcomes with a rank correlation of "
+                       "%+.3f." % r)
+    if np.isfinite(gap):
+        out.append("Splitting each engine at its own median confidence, the high half ran %+.1f "
+                   "points of edge and the low half %+.1f — a %+.1f point difference for a score "
+                   "that ranges over %d points."
+                   % (cd["top_half"]["lift"], cd["bottom_half"]["lift"], gap,
+                      int(marks["conf"].max() - marks["conf"].min())))
+
+    f = cd["filter"]
+    if len(f) > 2:
+        base, top = f.iloc[0], f.iloc[-1]
+        out.append("Raising the dashboard's minimum-confidence filter from %d%% to %d%% discards "
+                   "%.0f%% of the trades and moves the edge from %+.1f to %+.1f points — the "
+                   "filter costs sample and buys %s."
+                   % (base["threshold"], top["threshold"], 100 - top["kept"],
+                      base["lift"], top["lift"],
+                      "nothing" if top["lift"] <= base["lift"] + 1 else "a little"))
+
+    err = cd["calibration_error"]
+    if abs(err) > 3:
+        out.append("The score is also miscalibrated in level: it promised %.0f points more than it "
+                   "delivered on average. Miscalibration alone would be forgivable — a number that "
+                   "is uniformly too high still ranks — but here it is not ranking either."
+                   % err)
+
+    ra, rj = cd["rank_raw"], cd["rank_adjusted"]
+    if np.isfinite(ra) and np.isfinite(rj):
+        better = "better" if abs(rj) > abs(ra) + 0.02 else "no better"
+        out.append("Netting each signal's own base rate out of the score ranks outcomes %s "
+                   "(%+.3f against %+.3f raw), which points at the cause: the score measures how "
+                   "often the setup worked, not how much more often it worked than the same bet on "
+                   "any other day. Diagnostic only — a deployable version needs a point-in-time "
+                   "base rate." % (better, rj, ra))
+    return out
+
+
+def fig_conf_by_engine(marks, horizon, theme=None, colors=None):
+    """Within each engine, does more confidence mean more edge?"""
+    T = dict(THEME, **(theme or {}))
+    tab = conf_by_engine(marks, horizon)
+    fig = go.Figure()
+    for eng in [e for e in ENGINES if e in set(tab["engine"])]:
+        sub = tab[(tab["engine"] == eng) & (tab["n"] >= 15)]
+        if len(sub) < 2:
+            continue
+        fig.add_trace(go.Scatter(
+            x=sub["conf_bin"].astype(str), y=sub["lift"], mode="lines+markers", name=eng,
+            line=dict(color=_ec(colors).get(eng, T["BLUE"]), width=2.5),
+            marker=dict(size=[min(6 + n / 25.0, 20) for n in sub["n"]]),
+            customdata=sub["n"],
+            hovertemplate=eng + "<br>%{x} confidence<br>edge %{y:+.1f} pts (n=%{customdata})"
+                          "<extra></extra>"))
+    fig.add_hline(y=0, line=dict(color=T["MUTED"], width=1, dash="dot"))
+    _layout(fig, T, "Does more confidence mean more edge?",
+            "Edge over baseline by confidence bucket, within each engine. Comparing engines to "
+            "each other confounds the question — an engine with a rich base rate posts high "
+            "confidence and high hit rates without any skill. Marker size is sample size. "
+            "%d-session hold." % horizon,
+            height=420, yaxis_title="edge over baseline  (pts)")
+    return fig
+
+
+def fig_conf_filter(marks, horizon, theme=None):
+    """What the dashboard's minimum-confidence filter actually buys."""
+    T = dict(THEME, **(theme or {}))
+    f = conf_filter(marks, horizon)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=[str(int(t)) for t in f["threshold"]], y=f["lift"],
+        marker_color=[T["GREEN"] if v > 0 else T["RED"] for v in f["lift"].fillna(0)],
+        text=["%d trades<br>%.0f%% kept" % (n, k) for n, k in zip(f["n"], f["kept"])],
+        textposition="outside", textfont=dict(color=T["MUTED"], size=10),
+        hovertemplate="min confidence %{x}%<br>edge %{y:+.1f} pts<extra></extra>"))
+    fig.add_hline(y=0, line=dict(color=T["MUTED"], width=1))
+    if len(f):
+        fig.add_hline(y=f.iloc[0]["lift"], line=dict(color=T["MUTED"], width=1, dash="dot"),
+                      annotation_text="edge with no filter", annotation_position="top left",
+                      annotation_font=dict(color=T["MUTED"], size=10))
+    _layout(fig, T, "What does filtering on confidence buy?",
+            "Edge over baseline among trades at or above each minimum-confidence setting. If the "
+            "bars do not rise, the filter is throwing away sample for nothing. %d-session hold."
+            % horizon,
+            height=400, xaxis_title="minimum confidence  (%)", yaxis_title="edge over baseline  (pts)")
+    fig.update_yaxes(range=[min(-1.0, float(f["lift"].min()) - 2), float(f["lift"].max()) + 4])
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Export — everything the presentation needs, in one call
+# ---------------------------------------------------------------------------
+FIGURES = [("01_calibration", fig_calibration, "Confidence calibration vs baseline"),
+           ("02_engines", fig_engines, "Hit rate vs baseline, by engine"),
+           ("03_equity", fig_equity, "Cumulative wins minus losses through the year"),
+           ("04_horizons", fig_horizons, "Edge over baseline by holding period"),
+           ("05_confidence_by_engine", fig_conf_by_engine, "Edge by confidence bucket, within engine"),
+           ("06_confidence_filter", fig_conf_filter, "What a minimum-confidence filter buys")]
+
+
+def _fig(fn, marks, horizon, theme, colors):
+    """Call a figure function, passing only the arguments it accepts."""
+    import inspect
+    kw = {}
+    params = inspect.signature(fn).parameters
+    if "theme" in params:
+        kw["theme"] = theme
+    if "colors" in params:
+        kw["colors"] = colors
+    if "horizon" in params:
+        return fn(marks, horizon, **kw)
+    return fn(marks, **kw)
+
+
+def export_pack(marks, horizon, cfg=None, outdir="presentation", theme=None, colors=None,
+                scale=2, width=1200, height=None):
+    """Write charts, tables and a numbers file for building slides.
+
+    Charts are written as PNG where the environment can render them (plotly needs
+    kaleido for static images) and always as a self-contained HTML fallback, so a
+    missing dependency costs a screenshot rather than the deliverable.
+
+    Defaults to the Standard Chartered palette on a white ground — the notebook's
+    dark theme looks wrong on a corporate slide.
+    """
+    import os
+    theme = SC_THEME if theme is None else theme
+    colors = SC_ENGINE_COLOR if colors is None else colors
+    os.makedirs(outdir, exist_ok=True)
+    written, png_ok = [], True
+
+    for name, fn, caption in FIGURES:
+        fig = _fig(fn, marks, horizon, theme, colors)
+        if height:
+            fig.update_layout(height=height)
+        html = os.path.join(outdir, "%s.html" % name)
+        fig.write_html(html, include_plotlyjs=True)
+        written.append(html)
+        if png_ok:
+            try:
+                png = os.path.join(outdir, "%s.png" % name)
+                fig.write_image(png, width=width, height=fig.layout.height or 420, scale=scale)
+                written.append(png)
+            except Exception as exc:                     # kaleido missing or broken
+                png_ok = False
+                why = " ".join(str(exc).split())[:160] or type(exc).__name__
+                print("PNG export unavailable — %s\n"
+                      "  Not a problem: the .html charts are self-contained and interactive, so\n"
+                      "  open each one and screenshot it for the slide. To get PNGs directly,\n"
+                      "  install plotly's static-image backend (pip install kaleido) and re-run."
+                      % why)
+
+    # Tables, as CSV for the appendix and for tracing any number back to trades.
+    tabs = {"engines": table(marks, "engine", horizon=horizon),
+            "calibration": calibration(marks, horizon),
+            "confidence_by_engine": conf_by_engine(marks, horizon),
+            "confidence_filter": conf_filter(marks, horizon),
+            "horizons": pd.DataFrame([dict(horizon=h, **_block(marks[marks["horizon"] == h]))
+                                      for h in sorted(marks["horizon"].unique())])}
+    for name, df in tabs.items():
+        path = os.path.join(outdir, "table_%s.csv" % name)
+        df.to_csv(path, index=False)
+        written.append(path)
+
+    trades = marks.drop(columns=[c for c in ("legs", "sectors") if c in marks.columns])
+    trades.to_csv(os.path.join(outdir, "all_marked_trades.csv"), index=False)
+    written.append(os.path.join(outdir, "all_marked_trades.csv"))
+
+    # The numbers file: every figure quoted on a slide, in one readable place.
+    md = os.path.join(outdir, "NUMBERS.md")
+    with open(md, "w") as fh:
+        fh.write(numbers_markdown(marks, horizon, cfg))
+    written.append(md)
+
+    print("wrote %d files to %s/" % (len(written), outdir))
+    for name, _, caption in FIGURES:
+        print("   %s.%s — %s" % (name, "png" if png_ok else "html", caption))
+    return written
+
+
+def numbers_markdown(marks, horizon, cfg=None):
+    """Every number a slide might quote, with the method that produced it."""
+    hd = headline(marks, horizon)
+    eng = table(marks, "engine", horizon=horizon)
+    cal = calibration(marks, horizon)
+    cd = conf_diagnostics(marks, horizon)
+    L = []
+    A = L.append
+
+    A("# Backtest results — numbers for the deck\n")
+    A("Generated from the notebook, %d-session holding period.\n" % horizon)
+
+    A("## Headline\n")
+    A("| Figure | Value |")
+    A("|---|---|")
+    A("| Replay dates | %d, weekly |" % hd["dates"])
+    A("| Period | %s to %s |" % (pd.Timestamp(hd["start"]).date(), pd.Timestamp(hd["end"]).date()))
+    A("| Signals marked | %d |" % hd["trades"])
+    A("| Assets involved | %d |" % hd["assets"])
+    A("| Hit rate | %.1f%% (95%% CI %.1f–%.1f) |" % (hd["hit"], hd["lo"], hd["hi"]))
+    A("| Baseline | %.1f%% |" % hd["baseline"])
+    A("| Edge over baseline | %+.1f pts (p = %.4f) |" % (hd["lift"], hd["p"]))
+    A("| Average confidence at entry | %.1f%% |" % hd["conf"])
+    if cfg:
+        A("| Settings replayed | %s percentiles, %s realized vol over %dd, cheap <= %dth / rich >= %dth, quality >= %s |"
+          % (cfg.get("lb_name"), cfg.get("rv_estimator"), cfg.get("rv_window"),
+             cfg.get("iv_lo"), cfg.get("iv_hi"), cfg.get("min_quality")))
+    A("")
+
+    A("## By engine\n")
+    A("| Engine | Trades | Hit rate | 95% CI | Baseline | Edge | p | Avg P&L | Avg confidence |")
+    A("|---|---|---|---|---|---|---|---|---|")
+    for _, r in eng.iterrows():
+        if not r["n"]:
+            continue
+        A("| %s | %d | %.1f%% | %.0f–%.0f | %.1f%% | %+.1f | %.4f | %+.2f %s | %.0f%% |"
+          % (r["engine"], r["n"], r["hit"], r["lo"], r["hi"], r["baseline"], r["lift"],
+             r["p"], r["pnl"], r["unit"], r["conf"]))
+    A("")
+
+    A("## Confidence calibration\n")
+    A("| Confidence bucket | Trades | Promised | Delivered | Baseline | Edge |")
+    A("|---|---|---|---|---|---|")
+    for _, r in cal.iterrows():
+        A("| %s | %d | %.0f%% | %.1f%% | %.1f%% | %+.1f |"
+          % (r["conf_bin"], r["n"], r["conf"], r["hit"], r["baseline"], r["lift"]))
+    A("")
+
+    A("## Does confidence rank outcomes?\n")
+    A("| Test | Value |")
+    A("|---|---|")
+    A("| Rank correlation, confidence vs win (pooled) | %+.3f |" % cd["rank_raw"])
+    A("| Rank correlation, within engine (sample-weighted) | %+.3f |" % cd["rank_within"])
+    A("| Rank correlation, confidence minus baseline vs win | %+.3f |" % cd["rank_adjusted"])
+    A("| Calibration error (promised minus delivered) | %+.1f pts |" % cd["calibration_error"])
+    if cd["top_half"]:
+        A("| Edge, high-confidence half of each engine | %+.1f pts (n=%d) |"
+          % (cd["top_half"]["lift"], cd["top_half"]["n"]))
+        A("| Edge, low-confidence half of each engine | %+.1f pts (n=%d) |"
+          % (cd["bottom_half"]["lift"], cd["bottom_half"]["n"]))
+    A("")
+    A("### What a minimum-confidence filter would have bought\n")
+    A("| Min confidence | Trades kept | % of sample | Hit rate | Baseline | Edge |")
+    A("|---|---|---|---|---|---|")
+    for _, r in cd["filter"].iterrows():
+        A("| %d%% | %d | %.0f%% | %.1f%% | %.1f%% | %+.1f |"
+          % (r["threshold"], r["n"], r["kept"], r["hit"], r["baseline"], r["lift"]))
+    A("")
+
+    A("## By holding period\n")
+    A("| Sessions held | Trades | Hit rate | Baseline | Edge |")
+    A("|---|---|---|---|---|")
+    for h in sorted(marks["horizon"].unique()):
+        b = _block(marks[marks["horizon"] == h])
+        A("| %d | %d | %.1f%% | %.1f%% | %+.1f |" % (h, b["n"], b["hit"], b["baseline"], b["lift"]))
+    A("")
+
+    A("## Written takeaways\n")
+    for t in takeaways(marks, horizon):
+        A("- %s" % t)
+    A("")
+    A("## Written confidence findings\n")
+    for t in conf_takeaways(marks, horizon):
+        A("- %s" % t)
+    A("")
+
+    A("## How to read these numbers\n")
+    A("- **Hit rate** — share of marked trades whose P&L was positive. One unit per trade, no "
+      "sizing, entry close to exit close, no costs.")
+    A("- **Baseline** — the same trade, same asset, same direction, same holding period, taken on "
+      "*every* date in the sample rather than only when the engine fired. This is what the bet "
+      "pays with no signal at all.")
+    A("- **Edge** — hit rate minus baseline, in percentage points. The only figure here that "
+      "represents skill rather than a base rate.")
+    A("- **p** — exact one-sided binomial probability of a hit rate at least this high if the "
+      "true rate were the baseline. Small p means the gap is unlikely to be luck.")
+    A("- **95% CI** — Wilson score interval on the hit rate. Wide intervals mean few trades.")
+    A("- **Caveat** — a setup that stays extreme for weeks is re-recorded at each replay, so "
+      "trades are not independent draws and the effective sample is smaller than the count.")
+    return "\n".join(L)
