@@ -2,7 +2,7 @@
 
     SC_TEMPLATE=/path/to/template.pptx python dev/build_deck.py
 
-The template is not committed (corporate asset); point SC_TEMPLATE at your copy.
+The template is a corporate asset and is not committed; point SC_TEMPLATE at it.
 
 Only the template's own layouts and placeholders are used — no hand-positioned
 shapes, no invented colours, no accent bars — so the visual design is the
@@ -208,13 +208,13 @@ s = add(M1.slide_layouts[8])
 s.placeholders[0].text_frame.paragraphs[0].add_run().text = \
     "Do the ideas actually work? How I tested"
 bullets(s.placeholders[1], [
-    (True, "Replayed a year, one week at a time"),
+    (True, "Replayed nine months, one week at a time"),
     "52 replays. At each date the data is rewound and the dashboard's own code is re-run, so the "
     "signals scored are the ones it would genuinely have printed that day. Nothing after the "
     "replay date is visible to it.",
-    (True, "Recorded every signal — 2,091 trades — not the good ones"),
-    "Each is held five sessions and marked entry close to exit close. One unit per trade, no "
-    "sizing, so the result measures whether the signal pointed the right way, not a P&L.",
+    (True, "Recorded every signal — 2,102 trades — not the good ones"),
+    "Each is held five days and marked entry close to exit close. One unit per trade, no sizing, "
+    "so the result measures whether the signal pointed the right way, not a P&L.",
     (True, "Scored every trade against a baseline"),
     "A hit rate alone proves nothing. So each trade was also scored as if taken on every date in "
     "the year, signal or not. That unconditional rate is the baseline, and the gap to it is the "
@@ -240,45 +240,55 @@ that a replay produces identical signals whether or not future data is present i
 # --------------------------------------------- 7. Results
 s = add(M1.slide_layouts[8])
 s.placeholders[0].text_frame.paragraphs[0].add_run().text = \
-    "Two of the five engines beat doing nothing"
+    "Three of the five engines beat doing nothing"
 picture(s, s.placeholders[1], "%s/engines.png" % ASSETS)
 notes(s, """
-Across all 2,091 trades the signals won 52.0% of the time against a 48.9% baseline — a 3.1 point
-edge, 95% interval 49.8 to 54.1, p = 0.002. Real, but small, and it is not spread evenly.
+Across all 2,102 trades the signals won 52.6% of the time against a 48.9% baseline — a 3.7 point
+edge, 95% interval 50.5 to 54.7, p = 0.0004. Real, but small, and not spread evenly.
 
-The variance risk premium and vol dispersion carry it: roughly +10 points each, both significant
-against their own baselines. Correlation RV and lead-lag are inside noise. IV mean-reversion is
-+2 points and not significant.
+The two volatility-spread engines carry it. The variance risk premium is +11.6 points (61.2% vs
+49.6%, n=268, p=0.0001) and vol dispersion +10.1 (58.2% vs 48.2%, n=201, p=0.003). IV
+mean-reversion clears its baseline more modestly at +6.1 points, p=0.02.
 
-The IV mean-reversion line is the one to explain rather than skip. Its win rate is 46.6%, below a
-coin flip, which looks like a broken engine — but its baseline is 44.6%. Buying volatility loses
-more often than it wins by nature, because vol drifts down most of the time and pays off in rare
-bursts. Judged against the right benchmark it is roughly neutral, not a disaster. That is the
-clearest example of why the baseline matters.
+The two price engines do not work. Lead-lag is +1.6 points and not significant despite the largest
+sample of all, 803 trades — which is the useful way to say it: this is not a small-sample problem,
+it is the most-tested engine and the edge still is not there. Correlation RV is actually negative
+at -0.7.
+
+The IV mean-reversion line is worth explaining rather than skipping. Its win rate is 51.0%, barely
+a coin flip, which looks unimpressive — but its baseline is 44.9%, the lowest of any engine.
+Buying volatility loses more often than it wins by nature, because vol drifts down most of the
+time and pays off in rare bursts. Against the right benchmark that 51% is a genuine +6 points.
+It is the clearest example on the slide of why the baseline matters.
 """)
 
 # --------------------------------------------- 8. Confidence
 s = add(M1.slide_layouts[8])
 s.placeholders[0].text_frame.paragraphs[0].add_run().text = \
-    "The confidence score did not rank the trades"
-picture(s, s.placeholders[1], "%s/conf_vs_edge.png" % ASSETS)
+    "Confidence sorts engines, not trades"
+picture(s, s.placeholders[1], "%s/confidence.png" % ASSETS)
 notes(s, """
 The dashboard attaches a confidence percentage to every idea: on past days when this setup was at
 least this extreme, how often did the bet work.
 
-The backtest says it does not do its job. The engine it was most sure about — IV mean-reversion at
-69% average confidence — delivered the least edge. The two engines that actually worked carried
-the lowest and middling confidence. Raising the minimum-confidence filter throws away trades
-without improving the edge on what is left.
+Left panel: sort every trade into confidence buckets and the edge climbs from +2.2 points to +7.9.
+That looks like a score doing its job, and it is the answer I first believed.
 
-The diagnosis is more interesting than the failure. The score measures how often a setup worked,
-not how much more often it worked than the same bet on any other day — so an engine sitting on a
-rich base rate scores high without any skill in it. It is measuring the base rate and calling it
-confidence.
+Right panel is the check that matters. Split each engine at its own median confidence and the high
+half runs +4.0 points against +3.4 for the low half — six tenths of a point, from a score that
+ranges over seventy. The rank correlation between confidence and whether a trade worked is +0.037
+within an engine. Effectively nothing.
 
-So: not delete it, fix it. Score confidence as the gap to the base rate rather than the raw hit
-rate. I have the diagnostic version of that in the backtest; a deployable one needs a
-point-in-time base rate rather than one computed over the whole sample.
+Both are true because confidence is really identifying the engine. The high buckets fill up with
+the variance premium and vol dispersion trades, which are the engines that work. Filtering to 65%
+confidence keeps 22% of the trades and raises the edge to +7.6 — but almost all of that comes from
+which engines survive the filter, not from ranking trades inside them. The slider is an engine
+switch with extra steps.
+
+So: not delete it, and not flatten everything to equal either. The score measures how often a
+setup worked, not how much more often than the same bet on any other day, so an engine sitting on
+a rich base rate scores high with no skill in it. Rebuild it as the gap to the base rate. The
+diagnostic version is in the backtest; a deployable one needs a point-in-time base rate.
 """)
 
 # --------------------------------------------- 9. Limits and next
@@ -287,16 +297,16 @@ s.placeholders[0].text_frame.paragraphs[0].add_run().text = "What I would change
 bullets(s.placeholders[1], [
     (True, "What I would change"),
     "Rebuild confidence as the gap to a base rate, not a raw hit rate.",
-    "Concentrate on the two vol engines; retire or rework correlation RV and lead-lag, which show "
-    "no measurable edge over a year.",
+    "Concentrate on the three volatility engines; retire or rework correlation RV and lead-lag, "
+    "which show no edge across 1,343 trades.",
     "Report every signal against its baseline in the dashboard itself, not only in the backtest.",
 ], size=15)
 bullets(s.placeholders[13], [
     (True, "What this does not prove"),
     "No costs, no sizing, no option greeks — this measures direction, not profit.",
     "A setup that stays extreme for weeks is recorded at every replay, so the trades are not "
-    "independent and the real sample is smaller than 2,091.",
-    "One year, one universe, one set of parameters.",
+    "independent and the real sample is smaller than 2,102.",
+    "Nine months, one universe, one set of parameters.",
 ], size=15)
 notes(s, """
 Say the limitations before anyone asks — it is the difference between a result and a claim.

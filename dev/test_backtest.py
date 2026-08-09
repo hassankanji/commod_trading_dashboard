@@ -361,6 +361,20 @@ def check_backtest(tt, ns, px, iv):
     for k in ("rank_raw", "rank_within", "rank_adjusted"):
         assert cd[k] is not None and (np.isnan(cd[k]) or -1 <= cd[k] <= 1), (k, cd[k])
     assert len(tt.conf_takeaways(marks, 5)) >= 2
+
+    # The filter decomposition must add up and must agree with conf_filter.
+    dec = cd["decomposition"]
+    assert len(dec) == len(f)
+    assert np.allclose(dec["edge"], dec["from_engine_mix"] + dec["from_confidence"])
+    assert np.allclose(dec["n"].values, f["n"].values)
+    base = dec.iloc[0]
+    assert abs(base["from_confidence"]) < 1e-9, \
+        "with no filter applied, none of the edge can come from filtering"
+
+    # Weekend rows make a "session" a calendar day; the helper removes them.
+    wpx, wiv = tt.business_days_only(px, iv)
+    assert (wpx["close"].index.dayofweek < 5).all() and len(wiv) == len(wpx["close"])
+    assert set(wpx) == set(px) and len(wpx["close"]) <= len(px["close"])
     for fig in (tt.fig_conf_by_engine(marks, 5), tt.fig_conf_filter(marks, 5)):
         assert fig.layout.title.text
     # ...and again in the Standard Chartered palette, which the deck exports use.
