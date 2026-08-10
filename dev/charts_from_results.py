@@ -1,102 +1,165 @@
-"""Charts from the user's REAL backtest table (transcribed from their screenshot).
-SC Prosper palette, white ground, sized for a 13.33x7.5in slide."""
+"""Slide charts drawn from the real backtest output.
+
+Numbers transcribed from presentation/NUMBERS.md: 1,970 signals, 52 weekly
+replays over trading days, 2025-08-11 to 2026-08-10, five-day holds.
+Standard Chartered Prosper palette on white, sized for a 13.33x7.5in slide.
+"""
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 NAVY, BLUE, LBLUE, GREEN, LGREEN = "#020B43", "#0473EA", "#7BB6F5", "#38D200", "#92E773"
 GREY, GRID, RED = "#525355", "#DCE1E7", "#D0021B"
 FONT = "SC Prosper Sans, Arial, Helvetica, sans-serif"
 
 # engine, trades, hit, ci_lo, ci_hi, baseline, edge, p, avg_conf
-# Real 5-day run: 2,102 marked trades, 52 replays, 2025-11-22 to 2026-08-09.
-DATA = [
-    ("IV mean-reversion",      290, 51.0, 45, 57, 44.9,  6.1, 0.0206, 69),
-    ("Variance risk premium",  268, 61.2, 55, 67, 49.6, 11.6, 0.0001, 57),
-    ("Vol dispersion (pairs)", 201, 58.2, 51, 65, 48.2, 10.1, 0.0027, 64),
-    ("Correlation RV",         540, 49.1, 45, 53, 49.8, -0.7, 0.6432, 51),
-    ("Lead-lag catch-up",      803, 51.3, 48, 55, 49.7,  1.6, 0.1965, 51),
+ENGINES = [
+    ("Vol dispersion (pairs)", 192, 64.1, 57, 71, 48.2, 15.9, 0.0000, 60),
+    ("Variance risk premium",  335, 59.4, 54, 65, 50.5,  8.9, 0.0007, 56),
+    ("IV mean-reversion",      339, 52.5, 47, 58, 44.8,  7.7, 0.0027, 68),
+    ("Correlation RV",         506, 53.0, 49, 57, 49.7,  3.3, 0.0741, 51),
+    ("Lead-lag catch-up",      598, 50.3, 46, 54, 49.1,  1.2, 0.2890, 51),
 ]
+COLOR = {"Vol dispersion (pairs)": NAVY, "Variance risk premium": BLUE,
+         "IV mean-reversion": LBLUE, "Correlation RV": "#B9C2CC",
+         "Lead-lag catch-up": "#B9C2CC"}
 
-# Pooled confidence buckets, and the within-engine comparison that reinterprets them.
-CALIB = [("<45", 359, 48.2, 46.0, 2.2), ("45-55", 811, 51.7, 49.1, 2.6),
-         ("55-65", 465, 53.1, 50.2, 3.0), ("65-75", 283, 58.3, 50.4, 7.9),
-         ("75+", 184, 55.4, 48.4, 7.0)]
-WITHIN = [("Low-confidence half<br>of each engine", 1103, 3.4),
-          ("High-confidence half<br>of each engine", 999, 4.0)]
-COLOR = {"IV mean-reversion": BLUE, "Variance risk premium": NAVY,
-         "Vol dispersion (pairs)": LBLUE, "Correlation RV": GREEN,
-         "Lead-lag catch-up": LGREEN}
+HOLD = [(1, 3.3), (2, 2.6), (3, 2.7), (5, 5.6), (8, 6.7), (13, 9.1), (21, 11.6)]
+
+ASSETS_BEST = [("Cocoa", 45, 21.0), ("S&P 500", 61, 18.6), ("Soybean Meal", 74, 17.8),
+               ("Copper", 52, 14.2), ("Palladium", 114, 11.9), ("Soybeans", 127, 11.8)]
+ASSETS_WORST = [("US 10Y future", 131, -3.9), ("Natural Gas", 82, -1.3), ("Silver", 181, -0.4),
+                ("Brent Crude", 175, 1.0), ("US Dollar", 79, 1.5), ("Sugar", 61, 1.7)]
+LIQUIDITY = [("Options re-price<br>most days", 898, 11.9),
+             ("Options re-price<br>rarely", 160, 6.2),
+             ("Price engines<br>(no options)", 1610, 2.5)]
+
+CONF_BUCKETS = [("<45", 317, 9.7), ("45-55", 788, 4.4), ("55-65", 418, 3.2),
+                ("65-75", 268, 9.3), ("75+", 179, 3.7)]
+CONF_HALVES = [("Least confident half<br>of each engine", 1068, 6.7),
+               ("Most confident half<br>of each engine", 902, 4.3)]
 
 
-def base(fig, title, sub, height):
+def base(fig, title, sub, height, margin=None):
     fig.update_layout(
         title=dict(text="<b>%s</b><br><span style='font-size:13px;color:%s'>%s</span>"
                         % (title, GREY, sub),
                    font=dict(size=20, color=NAVY, family=FONT), x=0, xanchor="left", y=0.94),
         paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF", height=height,
-        font=dict(family=FONT, color=GREY, size=13),
-        margin=dict(l=170, r=40, t=80, b=50), showlegend=False)
+        font=dict(family=FONT, color=GREY, size=13), showlegend=False,
+        margin=margin or dict(l=170, r=40, t=85, b=55))
     fig.update_xaxes(gridcolor=GRID, linecolor=GRID, zerolinecolor=GRID)
     fig.update_yaxes(gridcolor=GRID, linecolor=GRID, zerolinecolor=GRID)
     return fig
 
 
 def fig_engines():
-    d = sorted(DATA, key=lambda r: r[6])
+    d = sorted(ENGINES, key=lambda r: r[6])
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        y=[r[0] for r in d], x=[r[2] for r in d], orientation="h",
-        marker_color=[COLOR[r[0]] for r in d], width=0.6,
+        y=[r[0] for r in d], x=[r[2] for r in d], orientation="h", width=0.6,
+        marker_color=[COLOR[r[0]] for r in d],
         error_x=dict(type="data", symmetric=False,
                      array=[r[4] - r[2] for r in d], arrayminus=[r[2] - r[3] for r in d],
                      color=GREY, thickness=1.3, width=5)))
     fig.add_trace(go.Scatter(
         y=[r[0] for r in d], x=[r[5] for r in d], mode="markers",
-        marker=dict(symbol="diamond", size=13, color="#FFFFFF",
-                    line=dict(color=NAVY, width=2))))
+        marker=dict(symbol="diamond", size=13, color="#FFFFFF", line=dict(color=NAVY, width=2))))
     for r in d:
-        col = GREEN if r[7] < 0.05 else GREY
+        strong = r[7] < 0.05
         fig.add_annotation(x=104, y=r[0], xanchor="left", showarrow=False,
                            text="<b style='color:%s'>%+.1f pts</b>   n=%d   p=%.3f"
-                                % (col, r[6], r[1], r[7]),
+                                % (GREEN if strong else GREY, r[6], r[1], r[7]),
                            font=dict(color=GREY, size=12))
     base(fig, "Three of the five engines beat doing nothing",
          "Bars: win rate with 95% confidence interval. Diamonds: the same trades taken on every "
-         "date, signal or not. 5-session hold.", 470)
+         "date, signal or not. Five-day hold, 1,970 trades.", 470,
+         margin=dict(l=175, r=20, t=85, b=55))
     fig.update_xaxes(range=[0, 143], tickvals=[0, 20, 40, 60, 80, 100],
-                     ticktext=["0", "20%", "40%", "60%", "80%", "100%"])
+                     ticktext=["0", "20%", "40%", "60%", "80%", "100%"], title_text="win rate")
     fig.update_yaxes(showgrid=False)
-    fig.update_layout(margin=dict(l=170, r=20, t=85, b=50), xaxis_title="win rate")
+    return fig
+
+
+def fig_hold():
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=[h for h, _ in HOLD], y=[e for _, e in HOLD], mode="lines+markers",
+        line=dict(color=BLUE, width=3), marker=dict(size=10, color=BLUE)))
+    for h, e in HOLD:
+        fig.add_annotation(x=h, y=e, text="%+.1f" % e, showarrow=False, yshift=18,
+                           font=dict(color=NAVY, size=12))
+    fig.add_vrect(x0=4.2, x1=5.8, fillcolor=LBLUE, opacity=0.18, line_width=0)
+    fig.add_annotation(x=5, y=0.6, text="the one we report", showarrow=False,
+                       font=dict(color=GREY, size=11))
+    base(fig, "These trades take weeks, not days",
+         "Edge over baseline by how long the position is held. Five days is the only holding "
+         "period where consecutive trades do not overlap, so it is the conservative one to quote.",
+         430, margin=dict(l=80, r=50, t=85, b=60))
+    fig.update_xaxes(title_text="trading days held", tickvals=[h for h, _ in HOLD])
+    fig.update_yaxes(title_text="edge over baseline  (pts)", range=[0, 14])
+    return fig
+
+
+def fig_edge_lives():
+    fig = make_subplots(rows=1, cols=2, column_widths=[0.56, 0.44], horizontal_spacing=0.16,
+                        subplot_titles=("Best and worst underlyings",
+                                        "How liquid are the options?"))
+    rows = sorted(ASSETS_WORST + ASSETS_BEST, key=lambda r: r[2])
+    fig.add_trace(go.Bar(
+        y=[r[0] for r in rows], x=[r[2] for r in rows], orientation="h", width=0.68,
+        marker_color=[GREEN if r[2] > 3 else (RED if r[2] < 0 else "#B9C2CC") for r in rows],
+        text=["n=%d" % r[1] for r in rows], textposition="outside",
+        textfont=dict(color=GREY, size=10), cliponaxis=False), row=1, col=1)
+    fig.add_trace(go.Bar(
+        x=[r[0] for r in LIQUIDITY], y=[r[2] for r in LIQUIDITY], width=0.5,
+        marker_color=[NAVY, LBLUE, "#B9C2CC"],
+        text=["%+.1f pts<br>n=%d" % (r[2], r[1]) for r in LIQUIDITY], textposition="outside",
+        textfont=dict(color=NAVY, size=12), cliponaxis=False), row=1, col=2)
+    base(fig, "The edge is in agriculture, and in liquid options",
+         "Edge over baseline in percentage points. Pair trades count against both legs, so counts "
+         "exceed the 1,970 headline.", 470, margin=dict(l=125, r=40, t=115, b=60))
+    fig.update_xaxes(title_text="edge over baseline  (pts)", range=[-8, 27], row=1, col=1)
+    fig.update_yaxes(showgrid=False, row=1, col=1)
+    fig.update_yaxes(range=[0, 15], row=1, col=2)
+    for a in fig.layout.annotations[:2]:
+        a.font.size = 14
+        a.font.color = GREY
     return fig
 
 
 def fig_confidence():
-    """Pooled buckets rise; within engine the score is flat. That gap is the finding."""
-    from plotly.subplots import make_subplots
-    fig = make_subplots(rows=1, cols=2, column_widths=[0.62, 0.38], horizontal_spacing=0.13,
-                        subplot_titles=("Pooled across engines: edge rises with confidence",
-                                        "Within each engine: it does not"))
+    fig = make_subplots(rows=1, cols=2, column_widths=[0.58, 0.42], horizontal_spacing=0.15,
+                        subplot_titles=("Edge by confidence bucket",
+                                        "Split each engine at its own median"))
     fig.add_trace(go.Bar(
-        x=[c[0] for c in CALIB], y=[c[4] for c in CALIB], marker_color=BLUE, width=0.62,
-        text=["%+.1f" % c[4] for c in CALIB], textposition="outside",
-        textfont=dict(color=NAVY, size=13), cliponaxis=False), row=1, col=1)
+        x=[c[0] for c in CONF_BUCKETS], y=[c[2] for c in CONF_BUCKETS], width=0.62,
+        marker_color=LBLUE, text=["%+.1f" % c[2] for c in CONF_BUCKETS],
+        textposition="outside", textfont=dict(color=NAVY, size=13), cliponaxis=False),
+        row=1, col=1)
     fig.add_trace(go.Bar(
-        x=[w[0] for w in WITHIN], y=[w[2] for w in WITHIN], marker_color=LBLUE, width=0.5,
-        text=["%+.1f" % w[2] for w in WITHIN], textposition="outside",
+        x=[c[0] for c in CONF_HALVES], y=[c[2] for c in CONF_HALVES], width=0.45,
+        marker_color=[GREEN, "#B9C2CC"],
+        text=["%+.1f pts" % c[2] for c in CONF_HALVES], textposition="outside",
         textfont=dict(color=NAVY, size=13), cliponaxis=False), row=1, col=2)
-    base(fig, "Confidence sorts engines, not trades",
-         "Edge over baseline, in percentage points. The left panel looks like a working score; "
-         "it is engine composition — the high buckets fill with the engines that work.", 470)
-    fig.update_layout(margin=dict(l=70, r=40, t=115, b=70), showlegend=False)
-    fig.update_yaxes(title_text="edge over baseline  (pts)", range=[0, 9.6], row=1, col=1)
-    fig.update_yaxes(range=[0, 9.6], row=1, col=2)
-    fig.update_xaxes(title_text="confidence bucket", row=1, col=1)
-    for a in fig.layout.annotations:
+    base(fig, "The confidence score does not pick winners",
+         "Edge over baseline. If the score worked, the left panel would climb and the right bar "
+         "would be taller than the left one. Rank correlation inside an engine: -0.002.", 450,
+         margin=dict(l=75, r=40, t=118, b=75))
+    fig.update_yaxes(title_text="edge over baseline  (pts)", range=[0, 12.5], row=1, col=1)
+    fig.update_yaxes(range=[0, 12.5], row=1, col=2)
+    fig.update_xaxes(title_text="confidence the dashboard assigned", row=1, col=1)
+    for a in fig.layout.annotations[:2]:
         a.font.size = 14
         a.font.color = GREY
     return fig
 
 
 if __name__ == "__main__":
-    for name, fig in [("engines", fig_engines()), ("confidence", fig_confidence())]:
-        fig.write_html("/tmp/deck/assets/%s.html" % name, include_plotlyjs=True)
+    for name, fig in [("engines", fig_engines()), ("hold", fig_hold()),
+                      ("edge_lives", fig_edge_lives()), ("confidence", fig_confidence())]:
+        import os
+        out = os.environ.get("DECK_ASSETS",
+                             os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets"))
+        os.makedirs(out, exist_ok=True)
+        fig.write_html(os.path.join(out, "%s.html" % name), include_plotlyjs=True)
     print("ok")
