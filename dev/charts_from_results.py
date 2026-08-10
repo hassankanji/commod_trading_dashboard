@@ -33,6 +33,27 @@ LIQUIDITY = [("Options re-price<br>most days", 898, 11.9),
              ("Options re-price<br>rarely", 160, 6.2),
              ("Price engines<br>(no options)", 1610, 2.5)]
 
+# engine -> {asset class: (edge, n)}, ordered as the notebook ordered it
+GRID_ROWS = ["Vol dispersion (pairs)", "IV mean-reversion", "Variance risk premium",
+             "Correlation RV", "Lead-lag catch-up"]
+GRID_COLS = ["Livestock", "Softs", "Base Metals", "Grains / Oilseeds",
+             "Precious Metals", "Energy", "Macro"]
+ENGINE_GRID = {
+    "Vol dispersion (pairs)": {"Softs": (11.0, 36), "Grains / Oilseeds": (22.0, 56),
+                               "Precious Metals": (2.7, 47), "Energy": (23.1, 49)},
+    "IV mean-reversion": {"Livestock": (39.0, 15), "Softs": (-3.7, 79), "Base Metals": (24.3, 16),
+                          "Grains / Oilseeds": (14.4, 84), "Precious Metals": (4.6, 77),
+                          "Energy": (5.3, 68)},
+    "Variance risk premium": {"Livestock": (7.4, 30), "Softs": (27.5, 50), "Base Metals": (1.9, 22),
+                              "Grains / Oilseeds": (5.1, 92), "Precious Metals": (3.9, 73),
+                              "Energy": (8.6, 68)},
+    "Correlation RV": {"Base Metals": (7.1, 39), "Grains / Oilseeds": (7.1, 114),
+                       "Precious Metals": (1.2, 156), "Energy": (0.8, 188), "Macro": (-0.3, 128)},
+    "Lead-lag catch-up": {"Livestock": (-8.3, 48), "Softs": (6.1, 58), "Base Metals": (7.6, 36),
+                          "Grains / Oilseeds": (1.7, 131), "Precious Metals": (19.3, 62),
+                          "Energy": (-11.2, 129), "Macro": (3.9, 134)},
+}
+
 CONF_BUCKETS = [("<45", 317, 9.7), ("45-55", 788, 4.4), ("55-65", 418, 3.2),
                 ("65-75", 268, 9.3), ("75+", 179, 3.7)]
 CONF_HALVES = [("Least confident half<br>of each engine", 1068, 6.7),
@@ -154,12 +175,41 @@ def fig_confidence():
     return fig
 
 
+def fig_grid():
+    """Engine by asset class. Blank where the cell held fewer than 15 trades."""
+    z, text = [], []
+    for eng in GRID_ROWS:
+        zrow, trow = [], []
+        for cls in GRID_COLS:
+            cell = ENGINE_GRID[eng].get(cls)
+            if cell is None:
+                zrow.append(None)
+                trow.append("")
+            else:
+                edge, n = cell
+                zrow.append(edge)
+                trow.append("<b>%+.0f</b><br><span style='font-size:10px'>n=%d</span>" % (edge, n))
+        z.append(zrow)
+        text.append(trow)
+
+    fig = go.Figure(go.Heatmap(
+        z=z, x=GRID_COLS, y=GRID_ROWS, text=text, texttemplate="%{text}",
+        textfont=dict(size=13), zmid=0, zmin=-25, zmax=25,
+        colorscale=[[0.0, RED], [0.5, "#F2F4F7"], [1.0, GREEN]], xgap=3, ygap=3,
+        colorbar=dict(title=dict(text="edge<br>(pts)", side="right"), thickness=12, len=0.72),
+        hovertemplate="%{y} on %{x}<br>edge %{z:+.1f} pts<extra></extra>"))
+    base(fig, "Vol dispersion travels; lead-lag does not",
+         "Edge over baseline in percentage points. Blank cells held fewer than 15 trades. "
+         "A pair spanning two classes counts in both.", 460,
+         margin=dict(l=195, r=90, t=90, b=65))
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(showgrid=False, autorange="reversed")
+    return fig
+
+
 if __name__ == "__main__":
     for name, fig in [("engines", fig_engines()), ("hold", fig_hold()),
-                      ("edge_lives", fig_edge_lives()), ("confidence", fig_confidence())]:
-        import os
-        out = os.environ.get("DECK_ASSETS",
-                             os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets"))
-        os.makedirs(out, exist_ok=True)
-        fig.write_html(os.path.join(out, "%s.html" % name), include_plotlyjs=True)
+                      ("edge_lives", fig_edge_lives()), ("confidence", fig_confidence()),
+                      ("grid", fig_grid())]:
+        fig.write_html("/tmp/deck/assets/%s.html" % name, include_plotlyjs=True)
     print("ok")
