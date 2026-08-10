@@ -226,6 +226,33 @@ print(MARKS[MARKS["horizon"] == PRIMARY]
 
 code("""
 # =====================================================================
+# WHERE THE EDGE LIVES — by asset, asset class, and option liquidity
+# =====================================================================
+# More useful than the confidence score: which underlyings were worth watching,
+# and does a thinner option market give a cleaner signal? Pair trades count
+# against both legs, so the counts here exceed the headline.
+NAMES = NS["NAME"]
+
+display(fig_assets(MARKS, PRIMARY, names=NAMES, theme=TR.theme))
+display(fig_quality(MARKS, PRIMARY, names=NAMES, theme=TR.theme))
+
+print("Best and worst underlyings (edge over baseline, 20+ trades):")
+print(by_asset(MARKS, PRIMARY, NAMES)[
+    ["asset", "n", "hit", "baseline", "lift", "p", "engines"]].round(1).to_string(index=False))
+
+print()
+print("By asset class:")
+print(by_class(MARKS, PRIMARY)[
+    ["cls", "n", "hit", "baseline", "lift", "p"]].round(1).to_string(index=False))
+
+print()
+print("By option-market liquidity (Good = IV re-prices on 50%+ of days):")
+print(by_quality(MARKS, PRIMARY, NAMES)[
+    ["tier", "n", "hit", "baseline", "lift", "p"]].round(1).to_string(index=False))
+"""),
+
+code("""
+# =====================================================================
 # EXPORT — one HTML file for the slides, one CSV for the numbers
 # =====================================================================
 # backtest_report.html is self-contained: open it, screenshot the charts you
@@ -234,7 +261,9 @@ code("""
 figs = [fig_calibration(MARKS, PRIMARY, theme=TR.theme),
         fig_engines(MARKS, PRIMARY, theme=TR.theme),
         fig_equity(MARKS, PRIMARY, theme=TR.theme),
-        fig_horizons(MARKS, theme=TR.theme)]
+        fig_horizons(MARKS, theme=TR.theme),
+        fig_assets(MARKS, PRIMARY, names=NS["NAME"], theme=TR.theme),
+        fig_quality(MARKS, PRIMARY, names=NS["NAME"], theme=TR.theme)]
 
 parts = [report_html(MARKS, PRIMARY, CFG, theme=TR.theme)]
 for i, f in enumerate(figs):
@@ -263,7 +292,7 @@ code("""
 # white ground (PNG where kaleido is available, self-contained HTML either way),
 # the tables as CSV, every marked trade, and NUMBERS.md — one readable file
 # holding every figure a slide might quote, with the method that produced it.
-PACK = export_pack(MARKS, PRIMARY, CFG, outdir="presentation")
+PACK = export_pack(MARKS, PRIMARY, CFG, outdir="presentation", names=NS["NAME"])
 
 print()
 print(open("presentation/NUMBERS.md").read()[:1800])
