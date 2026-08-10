@@ -43,11 +43,12 @@ A backtest of the dashboard's five signal engines over the past year. The dashbo
 looks like a trade now*; this asks whether those calls were right, on the whole population of
 signals rather than a hand-picked few.
 
-**Method.** Step through the year one week at a time. At each step, rewind the price and implied-vol
-history to that date and re-run the dashboard's own `build_signals`. Every engine reads the last
-row of each series, so a truncated frame reproduces exactly what the dashboard would have printed
-that day — confidence scores included — with no look-ahead. Every signal on the board is recorded,
-then marked forward over 5, 10 and 21 sessions.
+**Method.** Step through the year one trading week at a time. At each step, rewind the price and
+implied-vol history to that date and re-run the dashboard's own `build_signals`. Every engine reads
+the last row of each series, so a truncated frame reproduces exactly what the dashboard would have
+printed that day — confidence scores included — with no look-ahead. Every signal on the board is
+recorded, then marked forward over 1, 2, 3, 5, 8, 13 and 21 trading days, which answers how long
+these ideas take to work as well as whether they work.
 
 **No sizing.** Every trade is one unit and the headline number is a hit rate. That keeps the result
 about signal quality instead of about a position-sizing rule layered on top. Average P&L per trade
@@ -61,7 +62,8 @@ between the two is the only thing that can fairly be called an edge.
 
 **To run in BQuant:** upload this notebook next to `commodities_vol_rv_dashboard.ipynb` and run
 every cell top to bottom. Nothing to install; nothing here writes to the dashboard. The Bloomberg
-pull takes a couple of minutes and the replay about a minute.
+pull takes a couple of minutes and the replay one to two. Everything lands in `presentation/`,
+and `presentation/NUMBERS.md` holds every figure in one readable file.
 """),
 
 library_cell("replay_source.py", "REPLAY LIBRARY",
@@ -114,16 +116,29 @@ code("""
 # =====================================================================
 # SETTINGS
 # =====================================================================
-close = DATA["px"]["close"]
+# The price index is the union of 29 instruments across exchanges with different
+# holiday calendars, forward-filled, so it lands a row on almost every calendar
+# day — weekends included. Horizons count rows, so without this filter a
+# "5-session" hold is nearer 3.5 trading days and 52 weekly replays cover about
+# nine months rather than a year. Set False to reproduce the raw-index run.
+TRADING_DAYS_ONLY = True
+
+PX, IV = (business_days_only(DATA["px"], DATA["iv"]) if TRADING_DAYS_ONLY
+          else (DATA["px"], DATA["iv"]))
+close = PX["close"]
 
 WEEKS    = 52                 # replays, walking back from the most recent data
-STEP     = 5                  # sessions between replays (5 = weekly)
-HORIZONS = (5, 10, 21)        # holding periods marked for every signal
+STEP     = 5                  # sessions between replays (5 = one trading week)
 PRIMARY  = 5                  # the horizon the report headlines
 
-# At STEP=5 the 5-session holds are consecutive and non-overlapping. Longer
-# horizons overlap each other by construction — they are shown to test whether
-# an edge survives a longer hold, not as extra independent evidence.
+# A grid rather than three points, so the results answer "how long do these take
+# to work" as well as "do they work". Marking is cheap — the replay itself is
+# the slow part and happens once regardless of how many horizons are scored.
+HORIZONS = (1, 2, 3, 5, 8, 13, 21)
+
+# Only the 5-day holds are consecutive and non-overlapping. Longer horizons
+# overlap each other by construction — they show whether an edge survives a
+# longer hold, not extra independent evidence.
 
 # The dashboard's default control panel. Change these to backtest a different
 # configuration — lookback=504 for 2y percentiles, min_conf=55 to test only the
@@ -149,7 +164,7 @@ def _progress(n, total, asof, k):
     if n == 1 or n % 10 == 0 or n == total:
         print("  %3d/%d   %s   %d signals" % (n, total, asof.date(), k))
 
-MARKS = run_backtest(TR, DATA["px"], DATA["iv"], CFG, weeks=WEEKS, step=STEP,
+MARKS = run_backtest(TR, PX, IV, CFG, weeks=WEEKS, step=STEP,
                      horizons=HORIZONS, progress=_progress)
 
 print("\\n%d marked trades across %d replay dates and %d horizons."
@@ -183,8 +198,30 @@ for line in conf_takeaways(MARKS, PRIMARY):
     print("· %s\\n" % line)
 
 CONF = conf_diagnostics(MARKS, PRIMARY)
-print(CONF["filter"][["threshold", "n", "kept", "hit", "baseline", "lift", "p"]]
-      .to_string(index=False))
+
+# The score is computed over a 21-day forward window for four of the five engines
+# (lead-lag uses its own measured lag). If it ranks outcomes at 21 days but not at
+# 5, the finding is not "the score is broken" but "the score answers a different
+# question than the dashboard implies".
+print("Does confidence rank outcomes, by holding period?")
+for h in sorted(MARKS["horizon"].unique()):
+    c = conf_diagnostics(MARKS, h)
+    print("  %2dd   within-engine r %+.3f | pooled r %+.3f | high half %+.1f vs low half %+.1f"
+          % (h, c["rank_within"], c["rank_raw"],
+             c["top_half"]["lift"], c["bottom_half"]["lift"]))
+
+# Filtering on confidence quietly filters on engine. This splits the two apart.
+print("\\nWhat a minimum-confidence filter buys, and where it comes from:")
+print(CONF["decomposition"][["threshold", "n", "kept", "edge",
+                             "from_engine_mix", "from_confidence"]]
+      .round(2).to_string(index=False))
+
+# One baseline per asset, direction, engine and horizon — not one per engine.
+print("\\nDistinct baselines behind each engine's number:")
+print(MARKS[MARKS["horizon"] == PRIMARY]
+      .drop_duplicates(subset=["engine", "name", "side"])
+      .groupby("engine")["baseline"].agg(["count", "min", "mean", "max"]).round(1)
+      .to_string())
 """),
 
 code("""

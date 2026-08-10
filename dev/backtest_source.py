@@ -1076,6 +1076,10 @@ def numbers_markdown(marks, horizon, cfg=None):
     A("| Baseline | %.1f%% |" % hd["baseline"])
     A("| Edge over baseline | %+.1f pts (p = %.4f) |" % (hd["lift"], hd["p"]))
     A("| Average confidence at entry | %.1f%% |" % hd["conf"])
+    wk = pd.to_datetime(pd.Series(list(marks["entry_date"].unique())))
+    A("| Calendar | %s |" % ("trading days, weekends excluded"
+                             if (wk.dt.dayofweek < 5).all()
+                             else "CALENDAR days — the index carries weekend rows"))
     if cfg:
         A("| Settings replayed | %s percentiles, %s realized vol over %dd, cheap <= %dth / rich >= %dth, quality >= %s |"
           % (cfg.get("lb_name"), cfg.get("rv_estimator"), cfg.get("rv_window"),
@@ -1114,12 +1118,49 @@ def numbers_markdown(marks, horizon, cfg=None):
         A("| Edge, low-confidence half of each engine | %+.1f pts (n=%d) |"
           % (cd["bottom_half"]["lift"], cd["bottom_half"]["n"]))
     A("")
+    A("### Does it rank better on the horizon it was built for?\n")
+    A("The score is computed over a 21-day forward window for four of the five engines "
+      "(lead-lag uses its own measured lag), so it may simply be answering a different "
+      "question than a 5-day mark.\n")
+    A("| Sessions held | Within-engine rank corr | Pooled rank corr | High half edge | Low half edge |")
+    A("|---|---|---|---|---|")
+    for hh in sorted(marks["horizon"].unique()):
+        c = conf_diagnostics(marks, hh)
+        hi = c["top_half"]["lift"] if c["top_half"] else np.nan
+        lo = c["bottom_half"]["lift"] if c["bottom_half"] else np.nan
+        A("| %d | %+.3f | %+.3f | %+.1f | %+.1f |" % (hh, c["rank_within"], c["rank_raw"], hi, lo))
+    A("")
+
+    A("### Where a filter's benefit comes from\n")
+    A("Filtering on confidence quietly filters on engine. `from_engine_mix` is the edge the same "
+      "mix of engines would have delivered ignoring confidence entirely; `from_confidence` is "
+      "whatever the score adds beyond that.\n")
+    A("| Min confidence | Trades | % kept | Edge | From engine mix | From confidence |")
+    A("|---|---|---|---|---|---|")
+    for _, r in cd["decomposition"].iterrows():
+        A("| %d%% | %d | %.0f%% | %+.1f | %+.1f | %+.1f |"
+          % (r["threshold"], r["n"], r["kept"], r["edge"],
+             r["from_engine_mix"], r["from_confidence"]))
+    A("")
+
     A("### What a minimum-confidence filter would have bought\n")
     A("| Min confidence | Trades kept | % of sample | Hit rate | Baseline | Edge |")
     A("|---|---|---|---|---|---|")
     for _, r in cd["filter"].iterrows():
         A("| %d%% | %d | %.0f%% | %.1f%% | %.1f%% | %+.1f |"
           % (r["threshold"], r["n"], r["kept"], r["hit"], r["baseline"], r["lift"]))
+    A("")
+
+    A("## Baselines actually used\n")
+    A("One baseline per asset, direction, engine and horizon — not one per engine. The engine "
+      "figure quoted above is the average of these.\n")
+    prim = marks[marks["horizon"] == int(horizon)].drop_duplicates(
+        subset=["engine", "name", "side"])
+    A("| Engine | Distinct baselines | Lowest | Mean | Highest |")
+    A("|---|---|---|---|---|")
+    for eng, sub in prim.groupby("engine"):
+        A("| %s | %d | %.1f%% | %.1f%% | %.1f%% |"
+          % (eng, len(sub), sub["baseline"].min(), sub["baseline"].mean(), sub["baseline"].max()))
     A("")
 
     A("## By holding period\n")
