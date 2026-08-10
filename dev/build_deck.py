@@ -285,32 +285,31 @@ The price engines, which never touch options, sit at +2.5. Same story from anoth
 volatility engines are carrying this.
 """)
 
-# --------------------------------------------- 9. Confidence
+# --------------------------------------------- 9. Engine x market
 s = add(M1.slide_layouts[8])
-title(s, "The confidence score does not pick winners")
-picture(s, s.placeholders[1], "%s/confidence.png" % ASSETS)
+title(s, "Vol dispersion travels; lead-lag does not")
+picture(s, s.placeholders[1], "%s/grid.png" % ASSETS)
 notes(s, """
-The dashboard puts a confidence percentage on every idea. It comes from the asset's own history:
-on past days when this setup was at least this extreme, how often did the bet work.
+This is the two previous slides crossed. Which tool to point at which market.
 
-It does not survive the test. Inside an engine, the rank correlation between the score and
-whether the trade worked is -0.002. I checked every holding period from one day to 21 and it
-never gets above +0.04. Split each engine at its own median and the less confident half actually
-did better, +6.7 against +4.3.
+The thing I was checking: vol dispersion's +15.9 could have come from one lucky corner. It did
+not. Grains +22, energy +23, softs +11, on 36 to 56 trades each. It is the only engine that
+travels, and it is the one I would keep.
 
-Raising the minimum-confidence filter looks like it helps, but that is engine selection in
-disguise. At a 70% minimum the edge is +7.2 points, and +8.7 of that is explained purely by which
-engines survive the filter. Confidence itself contributes -1.5. You can get the same result by
-switching off the two engines that do not work, without throwing away 84% of the sample.
+Second reading, and the more useful one. Energy looked mediocre on the last slide at +3.7. That
+average hides two opposite things: vol dispersion made +23 in energy while lead-lag lost 11.
+Averaging across engines buried both. Same in precious metals, where lead-lag is +19 and
+everything else is flat.
 
-Why it fails is the interesting part. The score measures how often a setup worked, not how much
-more often it worked than the same bet on any other day. So an engine sitting on a favourable
-base rate scores high with no skill in it. It is measuring the base rate and calling it
-confidence.
+Lead-lag is the interesting failure. Overall it is +1.2 and looks dead, but it is +19 in precious
+metals and -11 in energy on 129 trades. Those cancel. Either it works somewhere specific and I
+have not isolated why, or I am looking at 29 cells and finding the extremes. With one year of
+data I cannot tell the difference, and I would rather say that than pick the flattering reading.
 
-The fix is not to delete it. Score it as the gap to the base rate instead of the raw hit rate.
-I have a diagnostic version in the backtest; a deployable one needs a point-in-time base rate
-rather than one computed over the whole sample.
+Two cells to be careful about if anyone points at them. IV mean-reversion in livestock is +39 on
+15 trades, right at the reporting threshold. And in the appendix table the top three
+vol-dispersion pairings are soybean meal, corn and soybeans at +33 each, which are largely the
+same spread trades counted against both legs, not three independent findings.
 """)
 
 # --------------------------------------------- 10. Change and limits
@@ -318,10 +317,11 @@ s = add(M1.slide_layouts[12])
 title(s, "A win rate means nothing until you know the baseline")
 bullets(s.placeholders[1], [
     (True, "What I would change"),
-    "Rebuild confidence as the gap to a base rate, not a raw hit rate.",
-    "Drop correlation RV and lead-lag, or rework them. 1,104 trades between them and no edge "
-    "worth the name.",
-    "Lean on the volatility engines and on liquid option markets, which is where the edge sits.",
+    "The confidence score does not pick winners. Inside an engine its correlation with whether "
+    "the trade worked is -0.002, and the less confident half did better. Rebuild it as the gap "
+    "to a base rate rather than a raw hit rate.",
+    "Keep vol dispersion, which is the only engine that works across markets. Rework correlation "
+    "RV and lead-lag rather than trusting their averages.",
     "Show every signal against its baseline in the dashboard, not only in the backtest.",
 ], size=15)
 bullets(s.placeholders[13], [
@@ -333,7 +333,15 @@ bullets(s.placeholders[13], [
     "26 assets tested, so some of the per-asset results are luck.",
 ], size=15)
 notes(s, """
-Land the title first. The dashboard was the build. The baseline was the judgement. Two engines
+The confidence line deserves thirty seconds, because it is the part where I tested my own work
+and it failed. The score measures how often a setup worked, not how much more often than the same
+bet on any other day, so an engine sitting on a favourable base rate scores high with no skill in
+it. Raising the minimum-confidence filter looks like it helps, but +8.7 of the +7.2 it delivers
+comes from which engines survive the filter and -1.5 from the score itself.
+
+Backup slide with that chart is behind this one if anyone wants to see it.
+
+Then land the title. The dashboard was the build. The baseline was the judgement. Two engines
 and the confidence score only looked good until there was something to compare them against.
 
 Then say the limitations before anyone asks. That is the difference between a result and a claim.
