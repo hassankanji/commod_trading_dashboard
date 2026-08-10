@@ -1021,6 +1021,7 @@ def export_pack(marks, horizon, cfg=None, outdir="presentation", theme=None, col
             "assets": by_asset(marks, horizon, names),
             "asset_class": by_class(marks, horizon),
             "liquidity": by_quality(marks, horizon, names),
+            "engine_by_asset": engine_asset_table(marks, horizon, names),
             "calibration": calibration(marks, horizon),
             "confidence_by_engine": conf_by_engine(marks, horizon),
             "confidence_filter": conf_filter(marks, horizon),
@@ -1190,6 +1191,31 @@ def numbers_markdown(marks, horizon, cfg=None, names=None):
         for _, r in q.iterrows():
             A("| %s | %d | %.1f%% | %.1f%% | %+.1f | %.3f |"
               % (r["tier"], r["n"], r["hit"], r["baseline"], r["lift"], r["p"]))
+        A("")
+
+    A("## Which engine on which market\n")
+    A("Edge over baseline in percentage points. Blank means fewer than 15 trades in that cell. "
+      "A pair spanning two classes counts in both.\n")
+    grid, cnt = engine_class_grid(marks, horizon)
+    if not grid.empty:
+        A("| Engine | " + " | ".join(grid.columns) + " |")
+        A("|---" * (len(grid.columns) + 1) + "|")
+        for eng in grid.index:
+            cells = []
+            for cls in grid.columns:
+                v = grid.loc[eng, cls]
+                cells.append("--" if pd.isna(v) else "%+.1f (n=%d)" % (v, cnt.loc[eng, cls]))
+            A("| %s | %s |" % (eng, " | ".join(cells)))
+        A("")
+
+    ea = engine_asset_table(marks, horizon, names)
+    if len(ea):
+        A("### Best engine-and-asset combinations (15+ trades)\n")
+        A("| Engine | Asset | Trades | Hit rate | Baseline | Edge | p |")
+        A("|---|---|---|---|---|---|---|")
+        for _, r in ea.head(12).iterrows():
+            A("| %s | %s | %d | %.1f%% | %.1f%% | %+.1f | %.3f |"
+              % (r["engine"], r["asset"], r["n"], r["hit"], r["baseline"], r["lift"], r["p"]))
         A("")
 
     A("## By holding period\n")
@@ -1368,6 +1394,110 @@ def fig_quality(marks, horizon, names=None, theme=None):
     return fig
 
 
+# ---------------------------------------------------------------------------
+# Which engine on which market
+# ---------------------------------------------------------------------------
+# The engine table says which tools work; the asset table says which markets
+# pay. Neither answers the question a desk would actually ask, which is which
+# tool to point at which market. This crosses the two.
+#
+# Asset class rather than individual asset: five engines across 26 names is 130
+# cells, most holding a handful of trades, and a grid that sparse invites people
+# to read noise as a pattern. Seven classes keeps most cells usable.
+def engine_class_grid(marks, horizon, min_trades=15):
+    """-> (edge grid, trade-count grid), engines by asset class.
+
+    A pair trade spanning two classes counts in both, same as `by_class`. Cells
+    thinner than `min_trades` come back as NaN rather than as a number nobody
+    should act on.
+    """
+    d = marks[marks["horizon"] == int(horizon)]
+    rows = []
+    for _, r in d.iterrows():
+        for cls in set(r["sectors"] or []):
+            rows.append(dict(engine=r["engine"], cls=cls, win=r["win"],
+                             baseline=r["baseline"], outcome=r["outcome"],
+                             unit=r["unit"], pnl=r["pnl"], conf=r["conf"]))
+    ex = pd.DataFrame(rows)
+    if ex.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    engines = [e for e in ENGINES if e in set(ex["engine"])]
+    classes = sorted(ex["cls"].unique())
+    edge = pd.DataFrame(index=engines, columns=classes, dtype=float)
+    counts = pd.DataFrame(0, index=engines, columns=classes, dtype=int)
+    for eng in engines:
+        for cls in classes:
+            sub = ex[(ex["engine"] == eng) & (ex["cls"] == cls)]
+            counts.loc[eng, cls] = len(sub)
+            if len(sub) >= min_trades:
+                edge.loc[eng, cls] = _block(sub)["lift"]
+
+    # Drop rows and columns where every cell was too thin to report: an entirely
+    # blank line reads as a broken chart rather than as missing data.
+    edge = edge.dropna(axis=0, how="all").dropna(axis=1, how="all")
+    if edge.empty:
+        return edge, counts.loc[[], []]
+
+    # Sort so the strongest engines and the strongest markets sit together.
+    edge = edge.loc[edge.mean(axis=1).sort_values(ascending=False).index]
+    col_order = edge.mean(axis=0).sort_values(ascending=False).index
+    return edge[col_order], counts.loc[edge.index, col_order]
+
+
+def engine_asset_table(marks, horizon, names=None, min_trades=15):
+    """The same crossing at individual-asset level, for the appendix."""
+    d = marks[marks["horizon"] == int(horizon)]
+    rows = []
+    for _, r in d.iterrows():
+        for tk, _sgn in (r["legs"] or []):
+            rows.append(dict(engine=r["engine"], asset=(names or {}).get(tk, tk),
+                             win=r["win"], baseline=r["baseline"], outcome=r["outcome"],
+                             unit=r["unit"], pnl=r["pnl"], conf=r["conf"]))
+    ex = pd.DataFrame(rows)
+    if ex.empty:
+        return ex
+    out = []
+    for (eng, asset), sub in ex.groupby(["engine", "asset"]):
+        if len(sub) < min_trades:
+            continue
+        b = _block(sub)
+        b.update(engine=eng, asset=asset)
+        out.append(b)
+    cols = ["engine", "asset", "n", "hit", "baseline", "lift", "p"]
+    return (pd.DataFrame(out, columns=cols)
+            .sort_values("lift", ascending=False).reset_index(drop=True))
+
+
+def fig_engine_class(marks, horizon, theme=None, min_trades=15):
+    """Heatmap of edge, engine by asset class."""
+    T = dict(THEME, **(theme or {}))
+    edge, counts = engine_class_grid(marks, horizon, min_trades)
+    if edge.empty:
+        return go.Figure()
+    lim = float(np.nanmax(np.abs(edge.values))) if edge.notna().any().any() else 10.0
+    text = [["" if np.isnan(edge.iloc[i, j])
+             else "<b>%+.0f</b><br><span style='font-size:10px'>n=%d</span>"
+                  % (edge.iloc[i, j], counts.iloc[i, j])
+             for j in range(edge.shape[1])] for i in range(edge.shape[0])]
+    fig = go.Figure(go.Heatmap(
+        z=edge.values, x=list(edge.columns), y=list(edge.index),
+        text=text, texttemplate="%{text}", textfont=dict(size=13),
+        zmid=0, zmin=-lim, zmax=lim,
+        colorscale=[[0.0, T["RED"]], [0.5, "#F2F4F7"], [1.0, T["GREEN"]]],
+        xgap=3, ygap=3,
+        colorbar=dict(title=dict(text="edge<br>(pts)", side="right"), thickness=12, len=0.75),
+        hovertemplate="%{y} on %{x}<br>edge %{z:+.1f} pts<extra></extra>"))
+    _layout(fig, T, "Which engine to point at which market",
+            "Edge over baseline in percentage points. Blank cells had fewer than %d trades. "
+            "A pair spanning two classes counts in both. %d-day hold." % (min_trades, horizon),
+            height=460)
+    fig.update_xaxes(showgrid=False, side="bottom")
+    fig.update_yaxes(showgrid=False, autorange="reversed")
+    fig.update_layout(margin=dict(l=185, r=80, t=90, b=70))
+    return fig
+
+
 FIGURES = [("01_calibration", fig_calibration, "Confidence calibration vs baseline"),
            ("02_engines", fig_engines, "Hit rate vs baseline, by engine"),
            ("03_equity", fig_equity, "Cumulative wins minus losses through the year"),
@@ -1375,4 +1505,5 @@ FIGURES = [("01_calibration", fig_calibration, "Confidence calibration vs baseli
            ("05_confidence_by_engine", fig_conf_by_engine, "Edge by confidence bucket, within engine"),
            ("06_confidence_filter", fig_conf_filter, "What a minimum-confidence filter buys"),
            ("07_assets", fig_assets, "Edge by underlying, best and worst"),
-           ("08_liquidity", fig_quality, "Edge against option-market liquidity")]
+           ("08_liquidity", fig_quality, "Edge against option-market liquidity"),
+           ("09_engine_by_class", fig_engine_class, "Which engine works on which market")]
