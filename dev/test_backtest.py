@@ -381,9 +381,31 @@ def check_backtest(tt, ns, px, iv):
     sc = tt.fig_engines(marks, 5, theme=tt.SC_THEME, colors=tt.SC_ENGINE_COLOR)
     assert sc.layout.paper_bgcolor == tt.SC_THEME["BG"]
 
+    # Where the edge lives: asset, class and liquidity splits.
+    nm = ns["NAME"]
+    ass = tt.by_asset(marks, 5, nm, min_trades=1)
+    assert len(ass) and (ass["lift"].notna()).any()
+    assert ass["asset"].is_unique
+    # every leg of every trade must be represented exactly once
+    legs_total = sum(len(r["legs"] or []) for _, r in marks[marks.horizon == 5].iterrows())
+    assert tt.by_asset(marks, 5, nm, min_trades=0)["n"].sum() == legs_total
+    assert set(ass["asset"]) <= set(nm.values())
+    cls = tt.by_class(marks, 5)
+    assert len(cls) and cls["n"].sum() >= len(marks[marks.horizon == 5])
+    q = tt.by_quality(marks, 5, nm)
+    assert q["n"].sum() == legs_total, "liquidity split lost or duplicated legs"
+    assert set(q["tier"]) <= {"Good", "Fair", "Weak", "price engines (no IV)"}
+    for fig in (tt.fig_assets(marks, 5, names=nm), tt.fig_quality(marks, 5, names=nm)):
+        assert fig.layout.title.text
+    print("asset / class / liquidity splits verified (%d assets, %d classes)" % (len(ass), len(cls)))
+
+    # A confidence spread that runs the wrong way must not be reported as working.
+    lines = " ".join(tt.conf_takeaways(marks, 5))
+    assert "survives the base rate" not in lines or "backwards" not in lines
+
     # The export pack must write something usable even with no PNG backend.
     outdir = os.path.join(tempfile.mkdtemp(prefix="pack-"), "presentation")
-    files = tt.export_pack(marks, 5, cfg, outdir=outdir)
+    files = tt.export_pack(marks, 5, cfg, outdir=outdir, names=ns["NAME"])
     assert len(files) >= len(tt.FIGURES) + 6
     for name, _, _ in tt.FIGURES:
         assert os.path.exists(os.path.join(outdir, "%s.html" % name)), name

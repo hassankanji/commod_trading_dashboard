@@ -380,36 +380,33 @@ def takeaways(marks, horizon, max_points=6):
         lo, hi = cal.iloc[0], cal.iloc[-1]
         raw = hi["hit"] - lo["hit"]
         net = hi["lift"] - lo["lift"]
-        # Pooled buckets mix engines together, so a rising line can be nothing but
-        # engine composition: the high-confidence buckets fill up with whichever
-        # engines score high, and if those are also the engines that work, the
-        # score looks predictive without ordering anything inside an engine.
-        # Defer to the within-engine test whenever the two disagree.
         within = conf_diagnostics(marks, h)
         wgap = within["half_gap"]
-        if np.isfinite(net) and np.isfinite(wgap) and net > 3 and abs(wgap) < 2:
+        if not np.isfinite(net):
+            out.append("Confidence buckets: %s hit %.1f%%, %s hit %.1f%% (%.1f-point spread)."
+                       % (lo["conf_bin"], lo["hit"], hi["conf_bin"], hi["hit"], raw))
+        elif net < -3:
+            # The score is not merely uninformative here, it points the wrong way.
+            out.append("Confidence runs backwards: the least confident signals (%s) delivered "
+                       "%+.1f points of edge against %+.1f for the most confident (%s). Whatever "
+                       "the score is measuring, it is not the odds of the trade working."
+                       % (lo["conf_bin"], lo["lift"], hi["lift"], hi["conf_bin"]))
+        elif net > 3 and np.isfinite(wgap) and abs(wgap) < 2:
+            # Pooled buckets mix engines, so a rising line can be nothing but
+            # composition: the high buckets fill with whichever engines score high.
             out.append("Confidence appears to rank trades — %s signals run %+.1f points of edge "
                        "against %+.1f for %s — but that is engine composition, not the score "
                        "working: within an engine, splitting at its own median confidence moves "
                        "the edge by only %+.1f points. The score sorts engines, not trades."
                        % (hi["conf_bin"], hi["lift"], lo["lift"], lo["conf_bin"], wgap))
-        elif not np.isfinite(net):
-            out.append("Confidence buckets: %s hit %.1f%%, %s hit %.1f%% (%.1f-point spread)."
-                       % (lo["conf_bin"], lo["hit"], hi["conf_bin"], hi["hit"], raw))
-        elif abs(net) < 3:
-            # The important case: a big raw spread that is really the baseline
-            # doing the work, because high-confidence buckets are dominated by
-            # bets that win anyway.
-            out.append("Confidence looks predictive — %s signals hit %.1f%% against %.1f%% for %s "
-                       "— but almost all of that %.0f-point gap is baseline, not skill: net of "
-                       "what those same trades pay on any date the spread is only %+.1f points. "
-                       "The score is mostly identifying bets with a favourable base rate."
-                       % (hi["conf_bin"], hi["hit"], lo["hit"], lo["conf_bin"], raw, net))
+        elif abs(net) <= 3:
+            out.append("Confidence does not discriminate: the %s bucket ran %+.1f points of edge "
+                       "and the %s bucket %+.1f, a %.1f-point spread across the whole range."
+                       % (lo["conf_bin"], lo["lift"], hi["conf_bin"], hi["lift"], net))
         else:
             out.append("Confidence carries real information: net of baseline, %s signals run "
-                       "%+.1f points of edge against %+.1f for %s — a %.1f-point spread that "
-                       "survives the base rate."
-                       % (hi["conf_bin"], hi["lift"], lo["lift"], lo["conf_bin"], net))
+                       "%+.1f points of edge against %+.1f for %s."
+                       % (hi["conf_bin"], hi["lift"], lo["lift"], lo["conf_bin"]))
 
     hs = sorted(marks["horizon"].unique())
     if len(hs) > 1:
@@ -965,15 +962,7 @@ def fig_conf_filter(marks, horizon, theme=None):
 # ---------------------------------------------------------------------------
 # Export — everything the presentation needs, in one call
 # ---------------------------------------------------------------------------
-FIGURES = [("01_calibration", fig_calibration, "Confidence calibration vs baseline"),
-           ("02_engines", fig_engines, "Hit rate vs baseline, by engine"),
-           ("03_equity", fig_equity, "Cumulative wins minus losses through the year"),
-           ("04_horizons", fig_horizons, "Edge over baseline by holding period"),
-           ("05_confidence_by_engine", fig_conf_by_engine, "Edge by confidence bucket, within engine"),
-           ("06_confidence_filter", fig_conf_filter, "What a minimum-confidence filter buys")]
-
-
-def _fig(fn, marks, horizon, theme, colors):
+def _fig(fn, marks, horizon, theme, colors, names=None):
     """Call a figure function, passing only the arguments it accepts."""
     import inspect
     kw = {}
@@ -982,13 +971,15 @@ def _fig(fn, marks, horizon, theme, colors):
         kw["theme"] = theme
     if "colors" in params:
         kw["colors"] = colors
+    if "names" in params:
+        kw["names"] = names
     if "horizon" in params:
         return fn(marks, horizon, **kw)
     return fn(marks, **kw)
 
 
 def export_pack(marks, horizon, cfg=None, outdir="presentation", theme=None, colors=None,
-                scale=2, width=1200, height=None):
+                names=None, scale=2, width=1200, height=None):
     """Write charts, tables and a numbers file for building slides.
 
     Charts are written as PNG where the environment can render them (plotly needs
@@ -1005,7 +996,7 @@ def export_pack(marks, horizon, cfg=None, outdir="presentation", theme=None, col
     written, png_ok = [], True
 
     for name, fn, caption in FIGURES:
-        fig = _fig(fn, marks, horizon, theme, colors)
+        fig = _fig(fn, marks, horizon, theme, colors, names)
         if height:
             fig.update_layout(height=height)
         html = os.path.join(outdir, "%s.html" % name)
@@ -1027,6 +1018,9 @@ def export_pack(marks, horizon, cfg=None, outdir="presentation", theme=None, col
 
     # Tables, as CSV for the appendix and for tracing any number back to trades.
     tabs = {"engines": table(marks, "engine", horizon=horizon),
+            "assets": by_asset(marks, horizon, names),
+            "asset_class": by_class(marks, horizon),
+            "liquidity": by_quality(marks, horizon, names),
             "calibration": calibration(marks, horizon),
             "confidence_by_engine": conf_by_engine(marks, horizon),
             "confidence_filter": conf_filter(marks, horizon),
@@ -1044,7 +1038,7 @@ def export_pack(marks, horizon, cfg=None, outdir="presentation", theme=None, col
     # The numbers file: every figure quoted on a slide, in one readable place.
     md = os.path.join(outdir, "NUMBERS.md")
     with open(md, "w") as fh:
-        fh.write(numbers_markdown(marks, horizon, cfg))
+        fh.write(numbers_markdown(marks, horizon, cfg, names))
     written.append(md)
 
     print("wrote %d files to %s/" % (len(written), outdir))
@@ -1053,7 +1047,7 @@ def export_pack(marks, horizon, cfg=None, outdir="presentation", theme=None, col
     return written
 
 
-def numbers_markdown(marks, horizon, cfg=None):
+def numbers_markdown(marks, horizon, cfg=None, names=None):
     """Every number a slide might quote, with the method that produced it."""
     hd = headline(marks, horizon)
     eng = table(marks, "engine", horizon=horizon)
@@ -1163,6 +1157,41 @@ def numbers_markdown(marks, horizon, cfg=None):
           % (eng, len(sub), sub["baseline"].min(), sub["baseline"].mean(), sub["baseline"].max()))
     A("")
 
+    A("## Where the edge lives\n")
+    A("Pair trades are counted against both of their legs, so the trade counts here sum to more "
+      "than the headline. Assets with fewer than 20 trades are dropped.\n")
+    ass = by_asset(marks, horizon, names)
+    if len(ass):
+        A("| Asset | Trades | Hit rate | Baseline | Edge | p | Engines |")
+        A("|---|---|---|---|---|---|---|")
+        for _, r in ass.iterrows():
+            A("| %s | %d | %.1f%% | %.1f%% | %+.1f | %.3f | %d |"
+              % (r["asset"], r["n"], r["hit"], r["baseline"], r["lift"], r["p"], r["engines"]))
+        A("")
+
+    cls = by_class(marks, horizon)
+    if len(cls):
+        A("### By asset class\n")
+        A("| Class | Trades | Hit rate | Baseline | Edge | p |")
+        A("|---|---|---|---|---|---|")
+        for _, r in cls.iterrows():
+            A("| %s | %d | %.1f%% | %.1f%% | %+.1f | %.3f |"
+              % (r["cls"], r["n"], r["hit"], r["baseline"], r["lift"], r["p"]))
+        A("")
+
+    q = by_quality(marks, horizon, names)
+    if len(q):
+        A("### By option-market liquidity\n")
+        A("The dashboard grades each implied-vol series by how often it re-prices: Good is 50%+ "
+          "of days, Fair 35-50%. Thin option markets re-mark rarely, so this doubles as a "
+          "liquidity proxy. Only the volatility engines carry a grade.\n")
+        A("| Data quality | Trades | Hit rate | Baseline | Edge | p |")
+        A("|---|---|---|---|---|---|")
+        for _, r in q.iterrows():
+            A("| %s | %d | %.1f%% | %.1f%% | %+.1f | %.3f |"
+              % (r["tier"], r["n"], r["hit"], r["baseline"], r["lift"], r["p"]))
+        A("")
+
     A("## By holding period\n")
     A("| Sessions held | Trades | Hit rate | Baseline | Edge |")
     A("|---|---|---|---|---|")
@@ -1194,3 +1223,156 @@ def numbers_markdown(marks, horizon, cfg=None):
     A("- **Caveat** — a setup that stays extreme for weeks is re-recorded at each replay, so "
       "trades are not independent draws and the effective sample is smaller than the count.")
     return "\n".join(L)
+
+
+# ---------------------------------------------------------------------------
+# Which assets, and does liquidity matter?
+# ---------------------------------------------------------------------------
+# A more useful question than the confidence score: where does the edge live?
+# Pair trades touch two assets, so they are counted once against each leg —
+# a Gold/Silver spread is evidence about both. That double-counts pair trades
+# across the table, which is the right call for "is this asset a good hunting
+# ground" and the wrong one for "how many independent bets were there".
+def _explode_legs(marks, horizon, names=None):
+    d = marks[marks["horizon"] == int(horizon)]
+    rows = []
+    for _, r in d.iterrows():
+        for tk, _sgn in (r["legs"] or []):
+            rows.append(dict(ticker=tk, asset=(names or {}).get(tk, tk),
+                             win=r["win"], baseline=r["baseline"], outcome=r["outcome"],
+                             unit=r["unit"], pnl=r["pnl"], conf=r["conf"],
+                             engine=r["engine"], tier=r.get("tier", "") or ""))
+    return pd.DataFrame(rows)
+
+
+def by_asset(marks, horizon, names=None, min_trades=20):
+    """Edge over baseline per underlying, best to worst."""
+    ex = _explode_legs(marks, horizon, names)
+    if ex.empty:
+        return ex
+    rows = []
+    for asset, sub in ex.groupby("asset"):
+        if len(sub) < min_trades:
+            continue
+        r = _block(sub)
+        r.update(asset=asset, engines=sub["engine"].nunique())
+        rows.append(r)
+    cols = ["asset", "n", "wins", "hit", "lo", "hi", "baseline", "lift", "p", "engines", "conf"]
+    out = pd.DataFrame(rows, columns=cols)
+    return out.sort_values("lift", ascending=False).reset_index(drop=True)
+
+
+def by_class(marks, horizon, classes=None):
+    """Edge by asset class, using the sector labels already on each trade."""
+    d = marks[marks["horizon"] == int(horizon)]
+    rows = []
+    for _, r in d.iterrows():
+        for cls in (r["sectors"] or []):
+            rows.append(dict(cls=cls, win=r["win"], baseline=r["baseline"],
+                             outcome=r["outcome"], unit=r["unit"], pnl=r["pnl"],
+                             conf=r["conf"]))
+    ex = pd.DataFrame(rows)
+    if ex.empty:
+        return ex
+    out = []
+    for cls, sub in ex.groupby("cls"):
+        b = _block(sub)
+        b["cls"] = cls
+        out.append(b)
+    cols = ["cls", "n", "wins", "hit", "lo", "hi", "baseline", "lift", "p", "conf"]
+    return pd.DataFrame(out, columns=cols).sort_values("lift", ascending=False).reset_index(drop=True)
+
+
+def by_quality(marks, horizon, names=None):
+    """Does the edge depend on how liquid the option market is?
+
+    The dashboard grades each implied-vol series by how often it actually
+    re-prices: Good is 50%+ of days, Fair 35-50%, Weak below that. That is a
+    liquidity proxy — a thin option market re-marks rarely. Only the three
+    volatility engines carry a grade; the price engines never touch implied vol,
+    so they are reported separately rather than lumped in.
+    """
+    ex = _explode_legs(marks, horizon, names)
+    if ex.empty:
+        return ex
+    ex["tier"] = ex["tier"].replace("", "price engines (no IV)")
+    rows = []
+    for tier in ["Good", "Fair", "Weak", "price engines (no IV)"]:
+        sub = ex[ex["tier"] == tier]
+        if sub.empty:
+            continue
+        r = _block(sub)
+        r["tier"] = tier
+        rows.append(r)
+    cols = ["tier", "n", "wins", "hit", "lo", "hi", "baseline", "lift", "p", "conf"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def fig_assets(marks, horizon, names=None, theme=None, top=7, min_trades=20):
+    """Best and worst hunting grounds, with intervals so thin ones read as thin."""
+    T = dict(THEME, **(theme or {}))
+    tab = by_asset(marks, horizon, names, min_trades)
+    if len(tab) > 2 * top:
+        tab = pd.concat([tab.head(top), tab.tail(top)])
+    tab = tab.sort_values("lift")
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=tab["asset"], x=tab["lift"], orientation="h", width=0.68,
+        marker_color=[T["GREEN"] if v > 0 else T["RED"] for v in tab["lift"]],
+        error_x=dict(type="data", symmetric=False,
+                     array=(tab["hi"] - tab["hit"]).tolist(),
+                     arrayminus=(tab["hit"] - tab["lo"]).tolist(),
+                     color=T["MUTED"], thickness=1.2, width=4),
+        customdata=np.stack([tab["n"], tab["hit"], tab["baseline"]], axis=-1),
+        hovertemplate=("%{y}<br>edge %{x:+.1f} pts<br>%{customdata[1]:.0f}% vs "
+                       "%{customdata[2]:.0f}% baseline<br>n=%{customdata[0]}<extra></extra>"),
+        showlegend=False))
+    # Sample sizes go in a column at the right rather than beside each bar, where
+    # they collide with the whiskers on the wide intervals.
+    span = float((tab["hi"] - tab["hit"] + tab["lift"].abs()).max()) if len(tab) else 10.0
+    edge = float(max(tab["lift"].abs().max(), 1) + span * 0.15)
+    label_x = edge * 1.28
+    for _, r in tab.iterrows():
+        fig.add_annotation(x=label_x, y=r["asset"], xanchor="right", showarrow=False,
+                           text="%.0f%% vs %.0f%%   n=%d" % (r["hit"], r["baseline"], r["n"]),
+                           font=dict(color=T["MUTED"], size=10), bgcolor=T["BG"])
+    fig.add_vline(x=0, line=dict(color=T["MUTED"], width=1))
+    _layout(fig, T, "Where the edge actually lives",
+            "Win rate minus baseline, by underlying. Pair trades count against both legs. "
+            "Whiskers are 95%% intervals on the win rate; assets with fewer than %d trades are "
+            "dropped. %d-day hold." % (min_trades, horizon),
+            height=470, xaxis_title="edge over baseline  (pts)")
+    fig.update_yaxes(showgrid=False)
+    fig.update_xaxes(range=[-edge, label_x * 1.02])
+    return fig
+
+
+def fig_quality(marks, horizon, names=None, theme=None):
+    """Edge against how often the option market re-prices."""
+    T = dict(THEME, **(theme or {}))
+    tab = by_quality(marks, horizon, names)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=tab["tier"], y=tab["lift"], width=0.55,
+        marker_color=[T["BLUE"] if t in ("Good", "Fair", "Weak") else T["MUTED"]
+                      for t in tab["tier"]],
+        text=["%+.1f pts<br>n=%d" % (l, n) for l, n in zip(tab["lift"], tab["n"])],
+        textposition="outside", textfont=dict(color=T["TXT"], size=12), cliponaxis=False,
+        showlegend=False))
+    fig.add_hline(y=0, line=dict(color=T["MUTED"], width=1))
+    _layout(fig, T, "Does a thinner option market mean a better signal?",
+            "Edge over baseline, split by how often each implied-vol series actually re-prices. "
+            "Good is 50%%+ of days, Fair 35-50%% — a proxy for how liquid the options are. "
+            "%d-day hold." % horizon,
+            height=400, yaxis_title="edge over baseline  (pts)")
+    return fig
+
+
+FIGURES = [("01_calibration", fig_calibration, "Confidence calibration vs baseline"),
+           ("02_engines", fig_engines, "Hit rate vs baseline, by engine"),
+           ("03_equity", fig_equity, "Cumulative wins minus losses through the year"),
+           ("04_horizons", fig_horizons, "Edge over baseline by holding period"),
+           ("05_confidence_by_engine", fig_conf_by_engine, "Edge by confidence bucket, within engine"),
+           ("06_confidence_filter", fig_conf_filter, "What a minimum-confidence filter buys"),
+           ("07_assets", fig_assets, "Edge by underlying, best and worst"),
+           ("08_liquidity", fig_quality, "Edge against option-market liquidity")]
