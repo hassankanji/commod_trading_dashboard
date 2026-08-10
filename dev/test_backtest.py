@@ -399,6 +399,25 @@ def check_backtest(tt, ns, px, iv):
         assert fig.layout.title.text
     print("asset / class / liquidity splits verified (%d assets, %d classes)" % (len(ass), len(cls)))
 
+    # Engine x asset-class crossing: every cell must match its own subset.
+    grid, cnt = tt.engine_class_grid(marks, 5, min_trades=1)
+    assert grid.shape == cnt.shape and not grid.empty
+    d5 = marks[marks.horizon == 5]
+    for eng in grid.index:
+        for cl in grid.columns:
+            want = sum(1 for _, r in d5.iterrows()
+                       if r["engine"] == eng and cl in set(r["sectors"] or []))
+            assert cnt.loc[eng, cl] == want, (eng, cl, cnt.loc[eng, cl], want)
+    thin, _ = tt.engine_class_grid(marks, 5, min_trades=10 ** 6)
+    assert thin.empty, "a grid with no reportable cell should come back empty"
+    full, _ = tt.engine_class_grid(marks, 5, min_trades=1)
+    assert not full.isna().all(axis=1).any() and not full.isna().all(axis=0).any(), \
+        "all-blank rows or columns should be dropped"
+    ea = tt.engine_asset_table(marks, 5, ns["NAME"], min_trades=1)
+    assert len(ea) and (ea["lift"].diff().dropna() <= 1e-9).all(), "not sorted by edge"
+    assert tt.fig_engine_class(marks, 5).layout.title.text
+    print("engine x asset-class grid verified (%d engines x %d classes)" % grid.shape)
+
     # A confidence spread that runs the wrong way must not be reported as working.
     lines = " ".join(tt.conf_takeaways(marks, 5))
     assert "survives the base rate" not in lines or "backwards" not in lines

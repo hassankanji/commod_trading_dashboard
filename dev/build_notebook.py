@@ -253,6 +253,28 @@ print(by_quality(MARKS, PRIMARY, NAMES)[
 
 code("""
 # =====================================================================
+# WHICH ENGINE ON WHICH MARKET — the two results crossed
+# =====================================================================
+# The engine table says which tools work, the asset table says which markets
+# pay. This says which tool to point at which market, which is the question a
+# desk would actually ask. Asset class rather than individual asset: five
+# engines across 26 names is 130 mostly-empty cells.
+display(fig_engine_class(MARKS, PRIMARY, theme=TR.theme))
+
+GRID, GRID_N = engine_class_grid(MARKS, PRIMARY)
+print("Edge over baseline, engine by asset class (blank = under 15 trades):")
+print(GRID.round(1).to_string())
+print()
+print("Trades behind each cell:")
+print(GRID_N.to_string())
+
+print()
+print("Best engine-and-asset pairings with 15+ trades:")
+print(engine_asset_table(MARKS, PRIMARY, NAMES).head(12).round(1).to_string(index=False))
+"""),
+
+code("""
+# =====================================================================
 # EXPORT — one HTML file for the slides, one CSV for the numbers
 # =====================================================================
 # backtest_report.html is self-contained: open it, screenshot the charts you
@@ -263,7 +285,8 @@ figs = [fig_calibration(MARKS, PRIMARY, theme=TR.theme),
         fig_equity(MARKS, PRIMARY, theme=TR.theme),
         fig_horizons(MARKS, theme=TR.theme),
         fig_assets(MARKS, PRIMARY, names=NS["NAME"], theme=TR.theme),
-        fig_quality(MARKS, PRIMARY, names=NS["NAME"], theme=TR.theme)]
+        fig_quality(MARKS, PRIMARY, names=NS["NAME"], theme=TR.theme),
+        fig_engine_class(MARKS, PRIMARY, theme=TR.theme)]
 
 parts = [report_html(MARKS, PRIMARY, CFG, theme=TR.theme)]
 for i, f in enumerate(figs):
